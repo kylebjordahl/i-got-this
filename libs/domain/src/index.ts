@@ -139,6 +139,17 @@ export type FamilyMemberFeedBaselineInput = z.infer<
   typeof FamilyMemberFeedBaselineInput
 >;
 
+/** Link a dependent to a feed (+ optional baseline for exception feeds). feedId comes from the path. */
+export const MemberFeedLinkInput = z.object({
+  familyMemberId: Id,
+  weekdayMask: WeekdayMask.optional(),
+  dayStart: TimeOfDay.optional(),
+  dayEnd: TimeOfDay.optional(),
+  generatesTypes: z.array(TaskType).optional(),
+  defaultAttendance: AttendanceRequirement.optional(),
+});
+export type MemberFeedLinkInput = z.infer<typeof MemberFeedLinkInput>;
+
 export const CreateClassificationRuleInput = z.object({
   feedId: Id.optional(),
   priority: z.number().int().default(100),

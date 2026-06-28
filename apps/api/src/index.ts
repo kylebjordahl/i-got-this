@@ -4,6 +4,7 @@ import type { HonoEnv } from './env.js';
 import { authMiddleware } from './middleware/auth.js';
 import { authRoutes } from './routes/auth.js';
 import { familyRoutes } from './routes/families.js';
+import { scheduled } from './scheduled.js';
 
 /**
  * API worker entrypoint. Phase 1 adds identity (magic-link auth + sessions),
@@ -45,21 +46,10 @@ app.get('/me', authMiddleware, async (c) => {
   });
 });
 
+// Family-scoped feeds (CRUD + force-refresh) live under
+// /families/:familyId/feeds (mounted inside familyRoutes).
 app.route('/families', familyRoutes);
-
-// --- Feed refresh (force) — Phase 2 implements the enqueue/parse ----------
-
-app.post('/feeds/:id/refresh', (c) =>
-  c.json(
-    { feedId: c.req.param('id'), queued: true, note: 'stub — implemented in Phase 2' },
-    202,
-  ),
-);
-
-app.post('/feeds/refresh-all', (c) =>
-  c.json({ queued: true, note: 'stub — implemented in Phase 2' }, 202),
-);
 
 app.notFound((c) => c.json({ error: 'not_found' }, 404));
 
-export default app;
+export default { fetch: app.fetch, scheduled };

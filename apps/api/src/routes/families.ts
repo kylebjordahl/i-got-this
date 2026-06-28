@@ -7,11 +7,15 @@ import {
   requireAdmin,
   requireFamilyMember,
 } from '../middleware/auth.js';
+import { feedRoutes } from './feeds.js';
 
 export const familyRoutes = new Hono<HonoEnv>();
 
 // Every family route requires a session.
 familyRoutes.use('*', authMiddleware);
+
+// Feed ingest routes live under /families/:familyId/feeds.
+familyRoutes.route('/:familyId/feeds', feedRoutes);
 
 /**
  * Create a family and seed the creator as an admin caretaker. (Prototype:

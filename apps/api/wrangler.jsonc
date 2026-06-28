@@ -8,6 +8,11 @@
   "compatibility_date": "2024-09-23",
   "compatibility_flags": ["nodejs_compat"],
   "observability": { "enabled": true },
+  "triggers": {
+    // Tick every 15 min; the scheduled handler ingests feeds whose
+    // refresh_minutes has elapsed.
+    "crons": ["*/15 * * * *"]
+  },
   "vars": {
     "ENVIRONMENT": "development"
   },
