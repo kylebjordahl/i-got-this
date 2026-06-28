@@ -1,0 +1,39 @@
+{
+  "name": "@igt/source",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Caretaker Calendar Platform — family logistics planner (v1)",
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "scripts": {
+    "build": "nx run-many -t build",
+    "test": "nx run-many -t test",
+    "lint": "nx run-many -t lint",
+    "typecheck": "nx run-many -t typecheck",
+    "api:dev": "nx run @igt/api:dev",
+    "db:generate": "nx run @igt/db:generate",
+    "db:migrate:local": "nx run @igt/api:db-migrate-local"
+  },
+  "pnpm": {
+    "overrides": {
+      "vitest": "3.2.6",
+      "@vitest/runner": "3.2.6",
+      "@vitest/snapshot": "3.2.6",
+      "@vitest/expect": "3.2.6",
+      "@vitest/spy": "3.2.6",
+      "@vitest/utils": "3.2.6",
+      "@vitest/mocker": "3.2.6",
+      "@vitest/pretty-format": "3.2.6"
+    }
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "^0.8.71",
+    "@cloudflare/workers-types": "^4.20240909.0",
+    "drizzle-kit": "^0.31.0",
+    "nx": "^23.0.0",
+    "typescript": "^5.6.0",
+    "vitest": "~3.2.0",
+    "wrangler": "^4.105.0"
+  }
+}

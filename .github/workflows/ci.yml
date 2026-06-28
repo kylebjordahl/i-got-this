@@ -1,0 +1,110 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CI: "true"
+
+jobs:
+  backend:
+    name: Backend (typecheck + tests)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+      - name: Enable pnpm
+        run: corepack enable && corepack prepare pnpm@9 --activate
+      - run: pnpm install --frozen-lockfile
+      - name: Typecheck
+        run: pnpm nx run-many -t typecheck
+      # Integration tests run inside workerd via @cloudflare/vitest-pool-workers
+      # (real D1/KV/Queue bindings) — no live Cloudflare account needed.
+      - name: Unit + integration tests
+        run: pnpm nx run-many -t test
+
+  flutter:
+    name: Flutter (analyze)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/mobile
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+      - run: flutter create . --platforms=ios,web --project-name caretaker_app
+      - run: flutter pub get
+      - run: flutter analyze
+      # - run: flutter test   # enabled once widget tests exist (Phase 5)
+
+  deploy-staging:
+    name: Deploy → staging + E2E (validation gate)
+    needs: [backend, flutter]
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: staging
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+      - run: corepack enable && corepack prepare pnpm@9 --activate
+      - run: pnpm install --frozen-lockfile
+      - uses: hashicorp/setup-terraform@v3
+      - name: Terraform apply (staging infra)
+        working-directory: infra/terraform
+        env:
+          TF_VAR_cloudflare_api_token: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          terraform init -backend-config=backend.staging.hcl
+          terraform apply -auto-approve -var-file=staging.tfvars
+      - name: Apply D1 migrations + deploy worker
+        working-directory: apps/api
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          pnpm wrangler d1 migrations apply igt-staging --env staging --remote
+          pnpm wrangler deploy --env staging
+      - name: E2E against staging
+        run: echo "TODO: black-box API E2E (feed→tasks→delivery) — Phase 2+"
+
+  deploy-production:
+    name: Promote → production
+    needs: [deploy-staging]
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: production # GitHub environment protection = manual approval gate
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+      - run: corepack enable && corepack prepare pnpm@9 --activate
+      - run: pnpm install --frozen-lockfile
+      - uses: hashicorp/setup-terraform@v3
+      - name: Terraform apply (production infra)
+        working-directory: infra/terraform
+        env:
+          TF_VAR_cloudflare_api_token: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          terraform init -backend-config=backend.production.hcl
+          terraform apply -auto-approve -var-file=production.tfvars
+      - name: Apply D1 migrations + deploy worker
+        working-directory: apps/api
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          pnpm wrangler d1 migrations apply igt-prod --env production --remote
+          pnpm wrangler deploy --env production

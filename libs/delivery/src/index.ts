@@ -1,0 +1,71 @@
+import type { DeliveryMethod, RsvpStatus } from '@igt/domain';
+
+/**
+ * Delivery abstraction. v1 ships three full-detail providers (email/iMIP via
+ * Cloudflare Email Service, CalDAV via tsdav, Google via the Calendar REST
+ * API). Block-only output (v1.1) and an ICS-feed provider slot in behind this
+ * same interface without reworking callers. Concrete providers are implemented
+ * in Phase 4.
+ */
+
+export interface DeliveryEvent {
+  /** Stable UID we own for this (task, target) so updates/cancels are idempotent. */
+  uid: string;
+  sequence: number;
+  start: Date;
+  end: Date | null;
+  summary: string;
+  description?: string;
+  location?: string;
+}
+
+export interface DeliveryTarget {
+  method: DeliveryMethod;
+  /** email address, CalDAV collection URL, or Google calendar id. */
+  addressOrUrl: string;
+  externalCalendarId?: string;
+  /** Resolved (decrypted) credential material, when the method needs it. */
+  credential?: DeliveryCredential;
+}
+
+export type DeliveryCredential =
+  | { kind: 'basic'; username: string; password: string }
+  | { kind: 'oauth'; accessToken: string };
+
+export interface DeliveryResult {
+  externalRef?: string;
+  sequence: number;
+}
+
+export interface DeliveryProvider {
+  readonly method: DeliveryMethod;
+  /** Create or update the event on the target. Returns the external reference. */
+  upsert(event: DeliveryEvent, target: DeliveryTarget): Promise<DeliveryResult>;
+  /** Remove a previously-delivered event (unassignment / cancellation). */
+  cancel(event: DeliveryEvent, target: DeliveryTarget): Promise<void>;
+}
+
+/** Inbound iMIP REPLY parse result (Email Worker → RSVP state). */
+export interface RsvpReply {
+  uid: string;
+  status: RsvpStatus;
+}
+
+export class DeliveryProviderRegistry {
+  private readonly providers = new Map<DeliveryMethod, DeliveryProvider>();
+
+  register(provider: DeliveryProvider): this {
+    this.providers.set(provider.method, provider);
+    return this;
+  }
+
+  get(method: DeliveryMethod): DeliveryProvider {
+    const p = this.providers.get(method);
+    if (!p) throw new Error(`No delivery provider registered for "${method}"`);
+    return p;
+  }
+
+  has(method: DeliveryMethod): boolean {
+    return this.providers.has(method);
+  }
+}

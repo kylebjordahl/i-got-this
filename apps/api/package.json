@@ -1,0 +1,17 @@
+{
+  "name": "@igt/api",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@igt/classification": "workspace:*",
+    "@igt/db": "workspace:*",
+    "@igt/delivery": "workspace:*",
+    "@igt/domain": "workspace:*",
+    "@igt/ical": "workspace:*",
+    "hono": "^4.6.0"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20240909.0"
+  }
+}

@@ -1,0 +1,29 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "lib": ["ES2022"],
+    "types": [],
+    "declaration": false,
+    "noEmit": true,
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "noImplicitOverride": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "verbatimModuleSyntax": true,
+    "baseUrl": ".",
+    "paths": {
+      "@igt/domain": ["libs/domain/src/index.ts"],
+      "@igt/db": ["libs/db/src/index.ts"],
+      "@igt/ical": ["libs/ical/src/index.ts"],
+      "@igt/classification": ["libs/classification/src/index.ts"],
+      "@igt/delivery": ["libs/delivery/src/index.ts"]
+    }
+  },
+  "exclude": ["node_modules", "dist"]
+}

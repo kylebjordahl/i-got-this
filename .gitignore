@@ -1,0 +1,48 @@
+# Node
+node_modules/
+dist/
+*.log
+.DS_Store
+
+# Nx
+.nx/cache
+.nx/workspace-data
+
+# Cloudflare / Wrangler
+.wrangler/
+.dev.vars
+.dev.vars.*
+wrangler.local.jsonc
+
+# Vitest
+coverage/
+
+# Drizzle
+# (migrations are committed; local sqlite state is not)
+*.sqlite
+*.sqlite-*
+
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+!*.tfvars.example
+crash.log
+
+# Flutter / Dart
+apps/mobile/.dart_tool/
+apps/mobile/build/
+apps/mobile/.flutter-plugins
+apps/mobile/.flutter-plugins-dependencies
+apps/mobile/ios/Pods/
+apps/mobile/ios/.symlinks/
+apps/mobile/.idea/
+*.iml
+
+# Codegen output (regenerated from OpenAPI)
+apps/mobile/lib/api/generated/
+
+# Env / secrets
+.env
+.env.*

@@ -1,0 +1,4 @@
+# Copy to staging.tfvars (git-ignored) and fill in. Token via env is preferred:
+#   export TF_VAR_cloudflare_api_token=...
+environment           = "staging"
+cloudflare_account_id = "REPLACE_ME"

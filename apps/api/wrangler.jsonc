@@ -1,0 +1,46 @@
+{
+  // Worker code + bindings are owned by Wrangler; durable infra (the actual D1
+  // database, Queues, Email Routing, etc.) is provisioned by Terraform. Keep
+  // binding names in sync between this file and the Terraform config.
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "igt-api",
+  "main": "src/index.ts",
+  "compatibility_date": "2024-09-23",
+  "compatibility_flags": ["nodejs_compat"],
+  "observability": { "enabled": true },
+  "vars": {
+    "ENVIRONMENT": "development"
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "igt-dev",
+      "database_id": "00000000-0000-0000-0000-000000000000",
+      "migrations_dir": "../../libs/db/migrations"
+    }
+  ],
+  "env": {
+    "staging": {
+      "vars": { "ENVIRONMENT": "staging" },
+      "d1_databases": [
+        {
+          "binding": "DB",
+          "database_name": "igt-staging",
+          "database_id": "REPLACE_WITH_TERRAFORM_OUTPUT",
+          "migrations_dir": "../../libs/db/migrations"
+        }
+      ]
+    },
+    "production": {
+      "vars": { "ENVIRONMENT": "production" },
+      "d1_databases": [
+        {
+          "binding": "DB",
+          "database_name": "igt-prod",
+          "database_id": "REPLACE_WITH_TERRAFORM_OUTPUT",
+          "migrations_dir": "../../libs/db/migrations"
+        }
+      ]
+    }
+  }
+}
