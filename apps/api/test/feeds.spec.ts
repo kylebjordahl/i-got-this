@@ -89,9 +89,11 @@ describe('feed ingest', () => {
       authed(alice.token),
     );
     expect(refresh1.status).toBe(200);
-    const r1 = (await refresh1.json()) as { result: { processed: number; fetched: boolean } };
-    expect(r1.result.fetched).toBe(true);
-    expect(r1.result.processed).toBe(2);
+    const r1 = (await refresh1.json()) as {
+      ingest: { processed: number; fetched: boolean };
+    };
+    expect(r1.ingest.fetched).toBe(true);
+    expect(r1.ingest.processed).toBe(2);
 
     // Re-ingest is idempotent (no duplicate source_events).
     const refresh2 = await call(

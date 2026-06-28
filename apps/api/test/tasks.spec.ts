@@ -1,0 +1,229 @@
+import { env } from 'cloudflare:test';
+import { eq, feeds, getDb, sourceEvents } from '@igt/db';
+import { describe, expect, it } from 'vitest';
+import { buildFeedTasks } from '../src/services/tasks.js';
+import { authed, bearer, call, createFamily, login } from './helpers.js';
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+function startOfUtcDay(d: Date): Date {
+  return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
+}
+function nextMonday(from: Date): Date {
+  const d = startOfUtcDay(from);
+  while ((d.getUTCDay() + 6) % 7 !== 0) d.setUTCDate(d.getUTCDate() + 1);
+  return d;
+}
+
+async function feedRow(feedId: string) {
+  const db = getDb(env.DB);
+  return (await db.select().from(feeds).where(eq(feeds.id, feedId)).limit(1))[0]!;
+}
+
+async function seedEvent(opts: {
+  feedId: string;
+  familyId: string;
+  uid: string;
+  start: Date;
+  summary: string;
+}) {
+  await getDb(env.DB)
+    .insert(sourceEvents)
+    .values({
+      feedId: opts.feedId,
+      familyId: opts.familyId,
+      icalUid: opts.uid,
+      recurrenceId: '',
+      dtstart: opts.start,
+      dtend: null,
+      summary: opts.summary,
+      location: null,
+      raw: null,
+      contentHash: `h-${opts.uid}`,
+    });
+}
+
+describe('exception/inverted task generation', () => {
+  it('cancels a no-school day but keeps picture day', async () => {
+    const admin = await login('sched-admin@example.com');
+    const familyId = await createFamily(admin.token, 'School Fam');
+
+    const feedRes = await call(
+      `/families/${familyId}/feeds`,
+      authed(admin.token, { url: 'https://x/cal.ics', mode: 'exception' }),
+    );
+    const { feed } = (await feedRes.json()) as { feed: { id: string } };
+
+    const childRes = await call(
+      `/families/${familyId}/members`,
+      authed(admin.token, { relationName: 'child', requiresCaretaker: true }),
+    );
+    const { member } = (await childRes.json()) as { member: { id: string } };
+
+    await call(
+      `/families/${familyId}/feeds/${feed.id}/member-links`,
+      authed(admin.token, {
+        familyMemberId: member.id,
+        weekdayMask: 31, // Mon–Fri
+        dayStart: '08:00',
+        dayEnd: '15:00',
+        generatesTypes: ['dropoff', 'pickup'],
+        defaultAttendance: 'any',
+      }),
+    );
+
+    // A feed-scoped rule: "Closed" cancels the day.
+    await call(
+      `/families/${familyId}/classification-rules`,
+      authed(admin.token, {
+        feedId: feed.id,
+        priority: 10,
+        matchField: 'summary',
+        matchOp: 'contains',
+        matchValue: 'Closed',
+        effect: 'cancel',
+      }),
+    );
+
+    // Deterministic one-week window (Mon–Sun).
+    const ws = nextMonday(new Date(Date.UTC(2026, 0, 1)));
+    const we = new Date(ws.getTime() + 7 * DAY_MS);
+    const wed = new Date(ws.getTime() + 2 * DAY_MS);
+    const thu = new Date(ws.getTime() + 3 * DAY_MS);
+
+    await seedEvent({
+      feedId: feed.id,
+      familyId,
+      uid: 'closed-wed',
+      start: new Date(wed.getTime() + 10 * 60 * 60 * 1000),
+      summary: 'MCH Closed - Holiday',
+    });
+    await seedEvent({
+      feedId: feed.id,
+      familyId,
+      uid: 'photos-thu',
+      start: new Date(thu.getTime() + 9 * 60 * 60 * 1000),
+      summary: 'School Photos',
+    });
+
+    const db = getDb(env.DB);
+    const result = await buildFeedTasks(db, await feedRow(feed.id), {
+      windowStart: ws,
+      windowEnd: we,
+    });
+    // Mon,Tue,Thu,Fri × 2 types = 8 (Wed cancelled).
+    expect(result.tasksCreated).toBe(8);
+
+    const list = await call(`/families/${familyId}/tasks`, bearer(admin.token));
+    const { tasks } = (await list.json()) as {
+      tasks: { dtstart: number; type: string }[];
+    };
+    expect(tasks).toHaveLength(8);
+
+    // No tasks on the cancelled Wednesday.
+    const wedTasks = tasks.filter(
+      (t) => startOfUtcDay(new Date(t.dtstart)).getTime() === wed.getTime(),
+    );
+    expect(wedTasks).toHaveLength(0);
+
+    // Picture-day Thursday is a normal school day (2 tasks).
+    const thuTasks = tasks.filter(
+      (t) => startOfUtcDay(new Date(t.dtstart)).getTime() === thu.getTime(),
+    );
+    expect(thuTasks).toHaveLength(2);
+
+    // Idempotent: re-build adds nothing.
+    const again = await buildFeedTasks(db, await feedRow(feed.id), {
+      windowStart: ws,
+      windowEnd: we,
+    });
+    expect(again.tasksCreated).toBe(0);
+  });
+});
+
+describe('explicit task generation + assignment', () => {
+  it('creates a task, claims it, and releases it (idempotent, owner preserved)', async () => {
+    const admin = await login('explicit-admin@example.com');
+    const familyId = await createFamily(admin.token, 'Activity Fam');
+
+    const feedRes = await call(
+      `/families/${familyId}/feeds`,
+      authed(admin.token, { url: 'https://x/soccer.ics', mode: 'explicit' }),
+    );
+    const { feed } = (await feedRes.json()) as { feed: { id: string } };
+
+    const childRes = await call(
+      `/families/${familyId}/members`,
+      authed(admin.token, { relationName: 'child', requiresCaretaker: true }),
+    );
+    const { member } = (await childRes.json()) as { member: { id: string } };
+
+    await call(
+      `/families/${familyId}/feeds/${feed.id}/member-links`,
+      authed(admin.token, { familyMemberId: member.id }),
+    );
+
+    await call(
+      `/families/${familyId}/classification-rules`,
+      authed(admin.token, {
+        priority: 100,
+        matchField: 'summary',
+        matchOp: 'contains',
+        matchValue: 'Soccer',
+        effect: 'create',
+        producesTypes: ['pickup'],
+        defaultAttendance: 'any',
+      }),
+    );
+
+    await seedEvent({
+      feedId: feed.id,
+      familyId,
+      uid: 'soccer-1',
+      start: new Date(Date.UTC(2026, 2, 10, 17)),
+      summary: 'Soccer practice',
+    });
+
+    const db = getDb(env.DB);
+    const built = await buildFeedTasks(db, await feedRow(feed.id));
+    expect(built.tasksCreated).toBe(1);
+
+    const unowned = await call(
+      `/families/${familyId}/tasks?status=unowned`,
+      bearer(admin.token),
+    );
+    const { tasks } = (await unowned.json()) as { tasks: { id: string }[] };
+    expect(tasks).toHaveLength(1);
+    const taskId = tasks[0]!.id;
+
+    // Claim it (defaults to the calling admin caretaker).
+    const claim = await call(
+      `/families/${familyId}/tasks/${taskId}/assign`,
+      authed(admin.token),
+    );
+    expect(claim.status).toBe(200);
+    const claimed = (await claim.json()) as { task: { status: string; ownerMemberId: string } };
+    expect(claimed.task.status).toBe('owned');
+
+    // Rebuild is a no-op and preserves ownership (event already built).
+    const rebuilt = await buildFeedTasks(db, await feedRow(feed.id));
+    expect(rebuilt.tasksCreated).toBe(0);
+    const stillOwned = await call(
+      `/families/${familyId}/tasks?status=owned`,
+      bearer(admin.token),
+    );
+    expect(((await stillOwned.json()) as { tasks: unknown[] }).tasks).toHaveLength(1);
+
+    // Release back to the pool.
+    const release = await call(
+      `/families/${familyId}/tasks/${taskId}/unassign`,
+      authed(admin.token),
+    );
+    expect(release.status).toBe(200);
+    const afterRelease = await call(
+      `/families/${familyId}/tasks?status=unowned`,
+      bearer(admin.token),
+    );
+    expect(((await afterRelease.json()) as { tasks: unknown[] }).tasks).toHaveLength(1);
+  });
+});

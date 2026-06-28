@@ -150,6 +150,12 @@ export const MemberFeedLinkInput = z.object({
 });
 export type MemberFeedLinkInput = z.infer<typeof MemberFeedLinkInput>;
 
+/** Assign a task to a caretaker; defaults to the calling member when omitted. */
+export const AssignTaskInput = z.object({
+  memberId: Id.optional(),
+});
+export type AssignTaskInput = z.infer<typeof AssignTaskInput>;
+
 export const CreateClassificationRuleInput = z.object({
   feedId: Id.optional(),
   priority: z.number().int().default(100),

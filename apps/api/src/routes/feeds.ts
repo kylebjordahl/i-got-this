@@ -4,6 +4,7 @@ import { Hono } from 'hono';
 import type { HonoEnv } from '../env.js';
 import { requireAdmin, requireFamilyMember } from '../middleware/auth.js';
 import { ingestFamilyFeeds, ingestFeed } from '../services/ingest.js';
+import { buildFeedTasks } from '../services/tasks.js';
 
 /** Mounted under /families/:familyId/feeds (auth applied by parent router). */
 export const feedRoutes = new Hono<HonoEnv>();
@@ -109,13 +110,21 @@ feedRoutes.post('/:feedId/refresh', async (c) => {
     .set({ lastRefreshRequestedAt: new Date() })
     .where(eq(feeds.id, feed.id));
 
-  const result = await ingestFeed(db, feed);
-  return c.json({ result });
+  const ingest = await ingestFeed(db, feed);
+  const build = await buildFeedTasks(db, feed);
+  return c.json({ ingest, build });
 });
 
-/** Force-refresh all of a family's feeds now. */
+/** Force-refresh all of a family's feeds now (ingest + rebuild tasks). */
 feedRoutes.post('/refresh-all', async (c) => {
   const db = getDb(c.env.DB);
-  const results = await ingestFamilyFeeds(db, c.get('member').familyId);
-  return c.json({ results });
+  const familyId = c.get('member').familyId;
+  const ingest = await ingestFamilyFeeds(db, familyId);
+
+  const familyFeeds = await db.select().from(feeds).where(eq(feeds.familyId, familyId));
+  const build = [];
+  for (const feed of familyFeeds) {
+    build.push(await buildFeedTasks(db, feed));
+  }
+  return c.json({ ingest, build });
 });
