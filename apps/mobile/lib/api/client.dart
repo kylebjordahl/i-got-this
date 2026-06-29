@@ -109,6 +109,39 @@ class ApiClient {
     return _obj(res);
   }
 
+  Future<List<dynamic>> listMemberLinks(String familyId, String feedId) async => _list(
+      await _dio.get('/families/$familyId/feeds/$feedId/member-links', options: _auth),
+      'links');
+
+  Future<void> updateMemberLink(
+    String familyId,
+    String feedId,
+    String linkId, {
+    int? weekdayMask,
+    String? dayStart,
+    String? dayEnd,
+    List<String>? generatesTypes,
+    String? defaultAttendance,
+    bool? active,
+  }) async {
+    await _dio.patch(
+      '/families/$familyId/feeds/$feedId/member-links/$linkId',
+      data: {
+        if (weekdayMask != null) 'weekdayMask': weekdayMask,
+        if (dayStart != null) 'dayStart': dayStart,
+        if (dayEnd != null) 'dayEnd': dayEnd,
+        if (generatesTypes != null) 'generatesTypes': generatesTypes,
+        if (defaultAttendance != null) 'defaultAttendance': defaultAttendance,
+        if (active != null) 'active': active,
+      },
+      options: _auth,
+    );
+  }
+
+  Future<void> deleteMemberLink(String familyId, String feedId, String linkId) async {
+    await _dio.delete('/families/$familyId/feeds/$feedId/member-links/$linkId', options: _auth);
+  }
+
   Future<Map<String, dynamic>> refreshFeed(String familyId, String feedId) async =>
       _obj(await _dio.post('/families/$familyId/feeds/$feedId/refresh',
           data: <String, dynamic>{}, options: _auth));

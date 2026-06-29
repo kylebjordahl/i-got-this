@@ -261,6 +261,9 @@ export const tasks = sqliteTable(
     familyId: text('family_id')
       .notNull()
       .references(() => families.id, { onDelete: 'cascade' }),
+    // The feed that generated this task (null for manually-created tasks) — lets
+    // us clean up a child's tasks when their feed link changes/removes.
+    feedId: text('feed_id').references(() => feeds.id, { onDelete: 'cascade' }),
     sourceEventId: text('source_event_id').references(() => sourceEvents.id, {
       onDelete: 'cascade',
     }),

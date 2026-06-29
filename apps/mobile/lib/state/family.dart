@@ -55,6 +55,14 @@ final feedsProvider = FutureProvider<List<Map<String, dynamic>>>((ref) async {
   return (await api.listFeeds(familyId)).cast<Map<String, dynamic>>();
 });
 
+/// Member links (with baselines) for a specific feed.
+final feedLinksProvider =
+    FutureProvider.family<List<Map<String, dynamic>>, String>((ref, feedId) async {
+  final api = ref.watch(apiClientProvider);
+  final familyId = await ref.watch(familyProvider.future);
+  return (await api.listMemberLinks(familyId, feedId)).cast<Map<String, dynamic>>();
+});
+
 final targetsProvider = FutureProvider<List<Map<String, dynamic>>>((ref) async {
   final api = ref.watch(apiClientProvider);
   final familyId = await ref.watch(familyProvider.future);

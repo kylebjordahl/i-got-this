@@ -1,5 +1,5 @@
 import { env } from 'cloudflare:test';
-import { eq, feeds, getDb, sourceEvents } from '@igt/db';
+import { and, eq, feeds, getDb, sourceEvents, tasks } from '@igt/db';
 import { describe, expect, it } from 'vitest';
 import { buildFeedTasks } from '../src/services/tasks.js';
 import { authed, bearer, call, createFamily, login } from './helpers.js';
@@ -225,5 +225,70 @@ describe('explicit task generation + assignment', () => {
       bearer(admin.token),
     );
     expect(((await afterRelease.json()) as { tasks: unknown[] }).tasks).toHaveLength(1);
+  });
+});
+
+describe('feed member-links management', () => {
+  it('lists links and removes a child + its unowned tasks', async () => {
+    const admin = await login('links-admin@example.com');
+    const familyId = await createFamily(admin.token, 'Links Fam');
+    const db = getDb(env.DB);
+
+    const feedRes = await call(
+      `/families/${familyId}/feeds`,
+      authed(admin.token, { url: 'https://x/cal.ics', mode: 'exception' }),
+    );
+    const { feed } = (await feedRes.json()) as { feed: { id: string } };
+
+    const childRes = await call(
+      `/families/${familyId}/members`,
+      authed(admin.token, { relationName: 'Adeline', requiresCaretaker: true }),
+    );
+    const { member } = (await childRes.json()) as { member: { id: string } };
+
+    const linkRes = await call(
+      `/families/${familyId}/feeds/${feed.id}/member-links`,
+      authed(admin.token, {
+        familyMemberId: member.id,
+        weekdayMask: 31,
+        dayStart: '08:00',
+        dayEnd: '15:00',
+        generatesTypes: ['dropoff', 'pickup'],
+        defaultAttendance: 'any',
+      }),
+    );
+    const { link } = (await linkRes.json()) as { link: { id: string } };
+
+    // List shows the link with the child's name.
+    const list = await call(`/families/${familyId}/feeds/${feed.id}/member-links`, bearer(admin.token));
+    const { links } = (await list.json()) as {
+      links: { id: string; memberRelation: string }[];
+    };
+    expect(links).toHaveLength(1);
+    expect(links[0]!.memberRelation).toBe('Adeline');
+
+    // Build baseline tasks for the next week, then delete the link.
+    const ws = new Date();
+    await buildFeedTasks(db, (await db.select().from(feeds).where(eq(feeds.id, feed.id)).limit(1))[0]!, {
+      windowStart: ws,
+      windowEnd: new Date(ws.getTime() + 7 * DAY_MS),
+    });
+    const beforeCount = (
+      await db.select().from(tasks).where(and(eq(tasks.feedId, feed.id), eq(tasks.familyMemberId, member.id)))
+    ).length;
+    expect(beforeCount).toBeGreaterThan(0);
+
+    const del = await call(`/families/${familyId}/feeds/${feed.id}/member-links/${link.id}`, {
+      method: 'DELETE',
+      headers: { Authorization: `Bearer ${admin.token}` },
+    });
+    expect(del.status).toBe(200);
+
+    const afterLinks = await call(`/families/${familyId}/feeds/${feed.id}/member-links`, bearer(admin.token));
+    expect(((await afterLinks.json()) as { links: unknown[] }).links).toHaveLength(0);
+    const afterCount = (
+      await db.select().from(tasks).where(and(eq(tasks.feedId, feed.id), eq(tasks.familyMemberId, member.id)))
+    ).length;
+    expect(afterCount).toBe(0);
   });
 });

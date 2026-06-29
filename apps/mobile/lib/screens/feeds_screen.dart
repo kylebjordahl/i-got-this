@@ -3,8 +3,9 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../state/auth.dart';
 import '../state/family.dart';
 
-/// Input feeds (school ICS, etc.): create, link to a child (+ baseline for
-/// exception feeds), and force a refresh.
+const _weekdayLabels = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+
+/// Input feeds: create, expand to manage linked children (+ baselines), refresh.
 class FeedsScreen extends ConsumerWidget {
   const FeedsScreen({super.key});
 
@@ -32,52 +33,150 @@ class FeedsScreen extends ConsumerWidget {
             : ListView(
                 children: [
                   for (final f in feeds)
-                    ListTile(
-                      leading: const CircleAvatar(child: Icon(Icons.rss_feed)),
-                      title: Text(
-                        f['url'] as String,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                      subtitle: Text(
-                        '${f['mode']} · ${f['status']} · every ${f['refreshMinutes']}m',
-                      ),
-                      trailing: PopupMenuButton<String>(
-                        onSelected: (v) => _onAction(context, ref, v, f),
-                        itemBuilder: (_) => const [
-                          PopupMenuItem(value: 'link', child: Text('Link a child')),
-                          PopupMenuItem(value: 'refresh', child: Text('Refresh now')),
-                        ],
-                      ),
-                    ),
+                    _FeedTile(feed: f),
                 ],
               ),
       ),
     );
   }
+}
 
-  Future<void> _onAction(
+class _FeedTile extends ConsumerWidget {
+  const _FeedTile({required this.feed});
+  final Map<String, dynamic> feed;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final feedId = feed['id'] as String;
+    final isException = feed['mode'] == 'exception';
+    final linksAsync = ref.watch(feedLinksProvider(feedId));
+
+    return ExpansionTile(
+      leading: const CircleAvatar(child: Icon(Icons.rss_feed)),
+      title: Text(feed['url'] as String, maxLines: 1, overflow: TextOverflow.ellipsis),
+      subtitle: Text('${feed['mode']} · ${feed['status']} · every ${feed['refreshMinutes']}m'),
+      childrenPadding: const EdgeInsets.only(bottom: 8),
+      children: [
+        linksAsync.when(
+          loading: () => const Padding(
+            padding: EdgeInsets.all(12),
+            child: LinearProgressIndicator(),
+          ),
+          error: (e, _) => Padding(padding: const EdgeInsets.all(12), child: Text('$e')),
+          data: (links) => Column(
+            children: [
+              if (links.isEmpty)
+                const ListTile(dense: true, title: Text('No children linked yet')),
+              for (final link in links)
+                ListTile(
+                  dense: true,
+                  leading: const Icon(Icons.child_care),
+                  title: Text(link['memberRelation'] as String),
+                  subtitle: Text(_baselineSummary(link, isException)),
+                  trailing: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      IconButton(
+                        icon: const Icon(Icons.edit, size: 20),
+                        onPressed: () => _linkDialog(context, ref, feedId, isException, link),
+                      ),
+                      IconButton(
+                        icon: const Icon(Icons.delete_outline, size: 20),
+                        onPressed: () => _removeLink(context, ref, feedId, link),
+                      ),
+                    ],
+                  ),
+                ),
+            ],
+          ),
+        ),
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 12),
+          child: Row(
+            children: [
+              TextButton.icon(
+                onPressed: () => _linkDialog(context, ref, feedId, isException, null),
+                icon: const Icon(Icons.add),
+                label: const Text('Link a child'),
+              ),
+              const Spacer(),
+              TextButton.icon(
+                onPressed: () => _refresh(context, ref, feedId),
+                icon: const Icon(Icons.sync),
+                label: const Text('Refresh'),
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+
+  String _baselineSummary(Map<String, dynamic> link, bool isException) {
+    if (!isException) return 'Explicit feed';
+    final mask = link['weekdayMask'] as int? ?? 0;
+    final days = [
+      for (var i = 0; i < 7; i++)
+        if ((mask & (1 << i)) != 0) _weekdayLabels[i],
+    ].join(' ');
+    final types = ((link['generatesTypes'] as List?)?.cast<String>() ?? const [])
+        .map((t) => t == 'dropoff' ? 'drop-off' : t)
+        .join('/');
+    final times = '${link['dayStart'] ?? '?'}–${link['dayEnd'] ?? '?'}';
+    return '${days.isEmpty ? '—' : days} · $times · $types';
+  }
+
+  Future<void> _refresh(BuildContext context, WidgetRef ref, String feedId) async {
+    final familyId = await ref.read(familyProvider.future);
+    await ref.read(apiClientProvider).refreshFeed(familyId, feedId);
+    ref.invalidate(unownedTasksProvider);
+    ref.invalidate(allTasksProvider);
+    if (context.mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Refreshed')));
+    }
+  }
+
+  Future<void> _linkDialog(
     BuildContext context,
     WidgetRef ref,
-    String action,
-    Map<String, dynamic> feed,
+    String feedId,
+    bool isException,
+    Map<String, dynamic>? existing,
   ) async {
-    if (action == 'refresh') {
-      final familyId = await ref.read(familyProvider.future);
-      await ref.read(apiClientProvider).refreshFeed(familyId, feed['id'] as String);
+    final changed = await showDialog<bool>(
+      context: context,
+      builder: (_) => _LinkChildDialog(feedId: feedId, isException: isException, existing: existing),
+    );
+    if (changed == true) {
+      ref.invalidate(feedLinksProvider(feedId));
       ref.invalidate(unownedTasksProvider);
-      if (context.mounted) {
-        ScaffoldMessenger.of(context)
-            .showSnackBar(const SnackBar(content: Text('Refreshed')));
-      }
-    } else if (action == 'link') {
-      await showDialog<void>(
-        context: context,
-        builder: (_) => _LinkChildDialog(
-          feedId: feed['id'] as String,
-          isException: feed['mode'] == 'exception',
-        ),
-      );
+      ref.invalidate(allTasksProvider);
+    }
+  }
+
+  Future<void> _removeLink(
+    BuildContext context,
+    WidgetRef ref,
+    String feedId,
+    Map<String, dynamic> link,
+  ) async {
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: const Text('Remove child from feed?'),
+        content: Text('Stop generating tasks for ${link['memberRelation']} from this feed?'),
+        actions: [
+          TextButton(onPressed: () => Navigator.of(context).pop(false), child: const Text('Cancel')),
+          FilledButton(onPressed: () => Navigator.of(context).pop(true), child: const Text('Remove')),
+        ],
+      ),
+    );
+    if (confirm == true) {
+      final familyId = await ref.read(familyProvider.future);
+      await ref.read(apiClientProvider).deleteMemberLink(familyId, feedId, link['id'] as String);
+      ref.invalidate(feedLinksProvider(feedId));
+      ref.invalidate(unownedTasksProvider);
+      ref.invalidate(allTasksProvider);
     }
   }
 }
@@ -139,10 +238,7 @@ class _AddFeedDialogState extends ConsumerState<_AddFeedDialog> {
             controller: _url,
             autofocus: true,
             keyboardType: TextInputType.url,
-            decoration: const InputDecoration(
-              labelText: 'ICS URL',
-              hintText: 'https://…/basic.ics',
-            ),
+            decoration: const InputDecoration(labelText: 'ICS URL', hintText: 'https://…/basic.ics'),
           ),
           const SizedBox(height: 12),
           SegmentedButton<String>(
@@ -156,8 +252,8 @@ class _AddFeedDialogState extends ConsumerState<_AddFeedDialog> {
           const Padding(
             padding: EdgeInsets.only(top: 6),
             child: Text(
-              'Exception: events are deviations from a Mon–Fri baseline '
-              '(no-school, early dismissal). Explicit: events become tasks directly.',
+              'Exception: events are deviations from a Mon–Fri baseline (no-school, '
+              'early dismissal). Explicit: events become tasks directly.',
               style: TextStyle(fontSize: 12),
             ),
           ),
@@ -190,26 +286,46 @@ class _AddFeedDialogState extends ConsumerState<_AddFeedDialog> {
   }
 }
 
+/// Create or edit a feed↔child link (+ baseline for exception feeds).
 class _LinkChildDialog extends ConsumerStatefulWidget {
-  const _LinkChildDialog({required this.feedId, required this.isException});
+  const _LinkChildDialog({required this.feedId, required this.isException, this.existing});
 
   final String feedId;
   final bool isException;
+  final Map<String, dynamic>? existing;
 
   @override
   ConsumerState<_LinkChildDialog> createState() => _LinkChildDialogState();
 }
 
 class _LinkChildDialogState extends ConsumerState<_LinkChildDialog> {
-  static const _weekdayLabels = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
-
   String? _childId;
-  final Set<int> _weekdays = {0, 1, 2, 3, 4}; // Mon–Fri
+  final Set<int> _weekdays = {0, 1, 2, 3, 4};
   final Set<String> _types = {'dropoff', 'pickup'};
   final _dayStart = TextEditingController(text: '08:00');
   final _dayEnd = TextEditingController(text: '15:00');
   bool _busy = false;
   String? _error;
+
+  bool get _editing => widget.existing != null;
+
+  @override
+  void initState() {
+    super.initState();
+    final ex = widget.existing;
+    if (ex != null) {
+      _childId = ex['familyMemberId'] as String?;
+      final mask = ex['weekdayMask'] as int? ?? 31;
+      _weekdays
+        ..clear()
+        ..addAll([for (var i = 0; i < 7; i++) if ((mask & (1 << i)) != 0) i]);
+      _types
+        ..clear()
+        ..addAll(((ex['generatesTypes'] as List?)?.cast<String>() ?? const ['dropoff', 'pickup']));
+      _dayStart.text = ex['dayStart'] as String? ?? '08:00';
+      _dayEnd.text = ex['dayEnd'] as String? ?? '15:00';
+    }
+  }
 
   @override
   void dispose() {
@@ -218,8 +334,7 @@ class _LinkChildDialogState extends ConsumerState<_LinkChildDialog> {
     super.dispose();
   }
 
-  int get _weekdayMask =>
-      _weekdays.fold(0, (mask, bit) => mask | (1 << bit));
+  int get _weekdayMask => _weekdays.fold(0, (m, b) => m | (1 << b));
 
   Future<void> _save() async {
     if (_childId == null) {
@@ -232,17 +347,30 @@ class _LinkChildDialogState extends ConsumerState<_LinkChildDialog> {
     });
     try {
       final familyId = await ref.read(familyProvider.future);
-      await ref.read(apiClientProvider).createMemberLink(
-            familyId,
-            widget.feedId,
-            familyMemberId: _childId!,
-            weekdayMask: widget.isException ? _weekdayMask : null,
-            dayStart: widget.isException ? _dayStart.text.trim() : null,
-            dayEnd: widget.isException ? _dayEnd.text.trim() : null,
-            generatesTypes: widget.isException ? _types.toList() : null,
-            defaultAttendance: widget.isException ? 'any' : null,
-          );
-      if (mounted) Navigator.of(context).pop();
+      final api = ref.read(apiClientProvider);
+      if (_editing) {
+        await api.updateMemberLink(
+          familyId,
+          widget.feedId,
+          widget.existing!['id'] as String,
+          weekdayMask: widget.isException ? _weekdayMask : null,
+          dayStart: widget.isException ? _dayStart.text.trim() : null,
+          dayEnd: widget.isException ? _dayEnd.text.trim() : null,
+          generatesTypes: widget.isException ? _types.toList() : null,
+        );
+      } else {
+        await api.createMemberLink(
+          familyId,
+          widget.feedId,
+          familyMemberId: _childId!,
+          weekdayMask: widget.isException ? _weekdayMask : null,
+          dayStart: widget.isException ? _dayStart.text.trim() : null,
+          dayEnd: widget.isException ? _dayEnd.text.trim() : null,
+          generatesTypes: widget.isException ? _types.toList() : null,
+          defaultAttendance: widget.isException ? 'any' : null,
+        );
+      }
+      if (mounted) Navigator.of(context).pop(true);
     } catch (e) {
       setState(() => _error = '$e');
     } finally {
@@ -254,10 +382,10 @@ class _LinkChildDialogState extends ConsumerState<_LinkChildDialog> {
   Widget build(BuildContext context) {
     final dependents = ref.watch(dependentsProvider);
     return AlertDialog(
-      title: const Text('Link a child to this feed'),
+      title: Text(_editing ? 'Edit baseline' : 'Link a child to this feed'),
       content: SingleChildScrollView(
         child: dependents.when(
-          loading: () => const Center(child: Padding(padding: EdgeInsets.all(16), child: CircularProgressIndicator())),
+          loading: () => const Padding(padding: EdgeInsets.all(16), child: CircularProgressIndicator()),
           error: (e, _) => Text('$e'),
           data: (children) {
             if (children.isEmpty) {
@@ -267,15 +395,21 @@ class _LinkChildDialogState extends ConsumerState<_LinkChildDialog> {
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                DropdownButtonFormField<String>(
-                  initialValue: _childId,
-                  decoration: const InputDecoration(labelText: 'Child'),
-                  items: [
-                    for (final c in children)
-                      DropdownMenuItem(value: c.id, child: Text(c.relationName)),
-                  ],
-                  onChanged: (v) => setState(() => _childId = v),
-                ),
+                if (_editing)
+                  Text(
+                    widget.existing!['memberRelation'] as String? ?? 'Child',
+                    style: Theme.of(context).textTheme.titleMedium,
+                  )
+                else
+                  DropdownButtonFormField<String>(
+                    initialValue: _childId,
+                    decoration: const InputDecoration(labelText: 'Child'),
+                    items: [
+                      for (final c in children)
+                        DropdownMenuItem(value: c.id, child: Text(c.relationName)),
+                    ],
+                    onChanged: (v) => setState(() => _childId = v),
+                  ),
                 if (widget.isException) ...[
                   const SizedBox(height: 16),
                   const Text('School days'),
@@ -286,9 +420,7 @@ class _LinkChildDialogState extends ConsumerState<_LinkChildDialog> {
                         FilterChip(
                           label: Text(_weekdayLabels[i]),
                           selected: _weekdays.contains(i),
-                          onSelected: (s) => setState(
-                            () => s ? _weekdays.add(i) : _weekdays.remove(i),
-                          ),
+                          onSelected: (s) => setState(() => s ? _weekdays.add(i) : _weekdays.remove(i)),
                         ),
                     ],
                   ),
@@ -319,9 +451,7 @@ class _LinkChildDialogState extends ConsumerState<_LinkChildDialog> {
                         FilterChip(
                           label: Text(t == 'dropoff' ? 'Drop-off' : 'Pickup'),
                           selected: _types.contains(t),
-                          onSelected: (s) => setState(
-                            () => s ? _types.add(t) : _types.remove(t),
-                          ),
+                          onSelected: (s) => setState(() => s ? _types.add(t) : _types.remove(t)),
                         ),
                     ],
                   ),
@@ -338,14 +468,14 @@ class _LinkChildDialogState extends ConsumerState<_LinkChildDialog> {
       ),
       actions: [
         TextButton(
-          onPressed: _busy ? null : () => Navigator.of(context).pop(),
+          onPressed: _busy ? null : () => Navigator.of(context).pop(false),
           child: const Text('Cancel'),
         ),
         FilledButton(
           onPressed: _busy ? null : _save,
           child: _busy
               ? const SizedBox(height: 18, width: 18, child: CircularProgressIndicator(strokeWidth: 2))
-              : const Text('Link'),
+              : Text(_editing ? 'Save' : 'Link'),
         ),
       ],
     );

@@ -150,6 +150,17 @@ export const MemberFeedLinkInput = z.object({
 });
 export type MemberFeedLinkInput = z.infer<typeof MemberFeedLinkInput>;
 
+/** Partial update for a feed↔member link (baseline). */
+export const UpdateMemberFeedLinkInput = z.object({
+  weekdayMask: WeekdayMask.optional(),
+  dayStart: TimeOfDay.optional(),
+  dayEnd: TimeOfDay.optional(),
+  generatesTypes: z.array(TaskType).optional(),
+  defaultAttendance: AttendanceRequirement.optional(),
+  active: z.boolean().optional(),
+});
+export type UpdateMemberFeedLinkInput = z.infer<typeof UpdateMemberFeedLinkInput>;
+
 /** Assign a task to a caretaker; defaults to the calling member when omitted. */
 export const AssignTaskInput = z.object({
   memberId: Id.optional(),

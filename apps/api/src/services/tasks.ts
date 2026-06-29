@@ -183,6 +183,7 @@ async function buildExplicit(
         } else {
           await db.insert(tasks).values({
             familyId: feed.familyId,
+            feedId: feed.id,
             sourceEventId: event.id,
             familyMemberId: link.familyMemberId,
             type: intent.type,
@@ -280,6 +281,7 @@ async function buildException(
             : atTime(day, link.dayStart, 8);
         await db.insert(tasks).values({
           familyId: feed.familyId,
+          feedId: feed.id,
           sourceEventId: null,
           familyMemberId: link.familyMemberId,
           type: type as never,
