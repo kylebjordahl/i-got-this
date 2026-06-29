@@ -1,5 +1,5 @@
 import { type Db, eq, feeds, sourceEvents } from '@igt/db';
-import { hashOccurrence, parseAndExpand } from '@igt/ical';
+import { extractTimezone, hashOccurrence, parseAndExpand } from '@igt/ical';
 
 export interface IngestOptions {
   fetchImpl?: typeof fetch;
@@ -92,6 +92,7 @@ export async function ingestFeed(
     .set({
       lastSyncedAt: new Date(),
       etag: etag ?? feed.etag,
+      timezone: extractTimezone(text) ?? feed.timezone,
       status: 'active',
     })
     .where(eq(feeds.id, feed.id));

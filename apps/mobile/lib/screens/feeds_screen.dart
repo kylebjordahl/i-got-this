@@ -54,7 +54,9 @@ class _FeedTile extends ConsumerWidget {
     return ExpansionTile(
       leading: const CircleAvatar(child: Icon(Icons.rss_feed)),
       title: Text(feed['url'] as String, maxLines: 1, overflow: TextOverflow.ellipsis),
-      subtitle: Text('${feed['mode']} · ${feed['status']} · every ${feed['refreshMinutes']}m'),
+      subtitle: Text(
+        '${feed['mode']} · ${feed['status']} · ${feed['timezone'] ?? 'UTC'} · every ${feed['refreshMinutes']}m',
+      ),
       childrenPadding: const EdgeInsets.only(bottom: 8),
       children: [
         linksAsync.when(

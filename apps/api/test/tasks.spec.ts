@@ -292,3 +292,52 @@ describe('feed member-links management', () => {
     expect(afterCount).toBe(0);
   });
 });
+
+describe('baseline timezone handling', () => {
+  it('interprets baseline wall-times in the feed timezone', async () => {
+    const admin = await login('tz-admin@example.com');
+    const familyId = await createFamily(admin.token, 'TZ Fam');
+    const db = getDb(env.DB);
+
+    const feedRes = await call(
+      `/families/${familyId}/feeds`,
+      authed(admin.token, { url: 'https://x/cal.ics', mode: 'exception' }),
+    );
+    const { feed } = (await feedRes.json()) as { feed: { id: string } };
+    await db.update(feeds).set({ timezone: 'America/Los_Angeles' }).where(eq(feeds.id, feed.id));
+
+    const childRes = await call(
+      `/families/${familyId}/members`,
+      authed(admin.token, { relationName: 'Kid', requiresCaretaker: true }),
+    );
+    const { member } = (await childRes.json()) as { member: { id: string } };
+    await call(
+      `/families/${familyId}/feeds/${feed.id}/member-links`,
+      authed(admin.token, {
+        familyMemberId: member.id,
+        weekdayMask: 31,
+        dayStart: '08:00',
+        dayEnd: '15:00',
+        generatesTypes: ['dropoff', 'pickup'],
+        defaultAttendance: 'any',
+      }),
+    );
+
+    // A July Monday — Pacific is on PDT (UTC-7).
+    const monday = nextMonday(new Date(Date.UTC(2026, 6, 1)));
+    const feedRow = (await db.select().from(feeds).where(eq(feeds.id, feed.id)).limit(1))[0]!;
+    await buildFeedTasks(db, feedRow, {
+      windowStart: monday,
+      windowEnd: new Date(monday.getTime() + DAY_MS),
+    });
+
+    const built = await db
+      .select()
+      .from(tasks)
+      .where(and(eq(tasks.feedId, feed.id), eq(tasks.familyMemberId, member.id)));
+    const dropoff = built.find((t) => t.type === 'dropoff')!;
+    const pickup = built.find((t) => t.type === 'pickup')!;
+    expect(dropoff.dtstart.getUTCHours()).toBe(15); // 08:00 PDT
+    expect(pickup.dtstart.getUTCHours()).toBe(22); // 15:00 PDT
+  });
+});

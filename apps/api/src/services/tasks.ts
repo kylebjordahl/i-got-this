@@ -67,11 +67,43 @@ function weekdayBit(d: Date): number {
   return (d.getUTCDay() + 6) % 7;
 }
 
-function atTime(day: Date, hhmm: string | null | undefined, fallbackHour: number): Date {
+/** Offset (ms) of `tz` from UTC at the given instant; 0 for UTC/unknown zones. */
+function tzOffsetMs(tz: string, utcMs: number): number {
+  if (tz === 'UTC') return 0;
+  try {
+    const dtf = new Intl.DateTimeFormat('en-US', {
+      timeZone: tz,
+      hourCycle: 'h23',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+    });
+    const m: Record<string, number> = {};
+    for (const p of dtf.formatToParts(new Date(utcMs))) {
+      if (p.type !== 'literal') m[p.type] = Number(p.value);
+    }
+    const asUtc = Date.UTC(m.year!, m.month! - 1, m.day!, m.hour!, m.minute!, m.second!);
+    return asUtc - utcMs;
+  } catch {
+    return 0; // unknown timezone → treat as UTC
+  }
+}
+
+/** Interpret `hhmm` as a wall-clock time in `tz` on `day`'s calendar date → UTC. */
+function wallTimeToUtc(
+  day: Date,
+  hhmm: string | null | undefined,
+  fallbackHour: number,
+  tz: string,
+): Date {
   const [h, m] = (hhmm ?? '').split(':');
   const hour = h !== undefined && m !== undefined ? Number(h) : fallbackHour;
   const min = h !== undefined && m !== undefined ? Number(m) : 0;
-  return new Date(day.getTime() + hour * 60 * 60 * 1000 + min * 60 * 1000);
+  const guess = Date.UTC(day.getUTCFullYear(), day.getUTCMonth(), day.getUTCDate(), hour, min);
+  return new Date(guess - tzOffsetMs(tz, guess));
 }
 
 /**
@@ -217,6 +249,7 @@ async function buildException(
 ): Promise<void> {
   const windowStart = startOfUtcDay(opts.windowStart ?? new Date());
   const windowEnd = opts.windowEnd ?? new Date(windowStart.getTime() + 30 * DAY_MS);
+  const tz = feed.timezone ?? 'UTC';
 
   // All feed events in the window, grouped by UTC day — these are the exceptions.
   const events = await db
@@ -274,11 +307,21 @@ async function buildException(
       }
 
       for (const type of resolved.types) {
-        if (existingByType.has(type)) continue;
         const start =
           type === 'pickup'
-            ? atTime(day, resolved.pickupTime ?? link.dayEnd, 15)
-            : atTime(day, link.dayStart, 8);
+            ? wallTimeToUtc(day, resolved.pickupTime ?? link.dayEnd, 15, tz)
+            : wallTimeToUtc(day, link.dayStart, 8, tz);
+
+        // Heal an existing baseline task whose time drifted (e.g. tz/config
+        // change); otherwise leave it (preserves ownership).
+        const priorTask = existingByType.get(type);
+        if (priorTask) {
+          if (priorTask.dtstart.getTime() !== start.getTime()) {
+            await db.update(tasks).set({ dtstart: start }).where(eq(tasks.id, priorTask.id));
+          }
+          continue;
+        }
+
         await db.insert(tasks).values({
           familyId: feed.familyId,
           feedId: feed.id,

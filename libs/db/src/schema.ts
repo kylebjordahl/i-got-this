@@ -127,6 +127,9 @@ export const feeds = sqliteTable(
     kind: text('kind', { enum: FeedKind.options }).notNull().default('ics'),
     url: text('url').notNull(),
     mode: text('mode', { enum: FeedMode.options }).notNull(),
+    // IANA timezone the calendar's wall-clock times are in (from X-WR-TIMEZONE);
+    // used to interpret exception baseline times. Null ⇒ treated as UTC.
+    timezone: text('timezone'),
     refreshMinutes: integer('refresh_minutes').notNull().default(360),
     etag: text('etag'),
     lastSyncedAt: integer('last_synced_at', { mode: 'timestamp_ms' }),
