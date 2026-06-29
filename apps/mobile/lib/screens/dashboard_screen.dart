@@ -102,7 +102,7 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
         itemBuilder: (context, i) {
           final t = _tasks[i] as Map<String, dynamic>;
           final type = t['type'] as String;
-          final start = DateTime.fromMillisecondsSinceEpoch(t['dtstart'] as int);
+          final start = _parseTimestamp(t['dtstart']);
           return ListTile(
             title: Text(_label(type)),
             subtitle: Text(start.toLocal().toString()),
@@ -121,4 +121,11 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
         'dropoff' => 'Drop-off',
         _ => 'Attendance',
       };
+
+  /// The API serializes timestamps as ISO-8601 strings (Drizzle Date ->
+  /// JSON.stringify). Accept epoch millis too, for safety.
+  DateTime _parseTimestamp(Object? value) {
+    if (value is int) return DateTime.fromMillisecondsSinceEpoch(value);
+    return DateTime.parse(value as String);
+  }
 }
