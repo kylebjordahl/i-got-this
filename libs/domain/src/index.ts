@@ -172,6 +172,31 @@ export type CreateClassificationRuleInput = z.infer<
   typeof CreateClassificationRuleInput
 >;
 
+/** Discover the CalDAV calendars available for a set of credentials. */
+export const CalDavDiscoverInput = z.object({
+  serverUrl: z.string().url(),
+  username: z.string().min(1),
+  password: z.string().min(1),
+});
+export type CalDavDiscoverInput = z.infer<typeof CalDavDiscoverInput>;
+
+const TargetCredential = z.object({
+  username: z.string().optional(),
+  password: z.string().optional(),
+  accessToken: z.string().optional(),
+});
+
+/** Partial update for an existing calendar target. */
+export const UpdateCalendarTargetInput = z.object({
+  name: z.string().min(1).max(120).optional(),
+  active: z.boolean().optional(),
+  addressOrUrl: z.string().min(1).optional(),
+  externalCalendarId: z.string().optional(),
+  providerHint: ProviderHint.optional(),
+  credential: TargetCredential.optional(),
+});
+export type UpdateCalendarTargetInput = z.infer<typeof UpdateCalendarTargetInput>;
+
 export const CreateCalendarTargetInput = z.object({
   memberId: Id,
   name: z.string().min(1).max(120),

@@ -4,7 +4,7 @@ import '../state/auth.dart';
 import '../state/family.dart';
 
 /// Calendar connections (delivery destinations) with a guided per-provider
-/// connect flow: email invite, iCloud (CalDAV), generic CalDAV, or Google.
+/// connect flow (incl. CalDAV calendar discovery) and edit/delete.
 class CalendarsScreen extends ConsumerWidget {
   const CalendarsScreen({super.key});
 
@@ -35,9 +35,17 @@ class CalendarsScreen extends ConsumerWidget {
                       leading: CircleAvatar(child: Icon(_iconFor(t['method'] as String))),
                       title: Text(t['name'] as String),
                       subtitle: Text(
-                        '${_methodLabel(t)} · ${t['memberRelation']} · ${t['addressOrUrl']}',
+                        '${_methodLabel(t)} · ${t['memberRelation']} · ${t['addressOrUrl']}'
+                        '${(t['active'] as bool? ?? true) ? '' : ' · paused'}',
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
+                      ),
+                      trailing: PopupMenuButton<String>(
+                        onSelected: (v) => _onAction(context, ref, v, t),
+                        itemBuilder: (_) => const [
+                          PopupMenuItem(value: 'edit', child: Text('Edit')),
+                          PopupMenuItem(value: 'delete', child: Text('Delete')),
+                        ],
                       ),
                     ),
                 ],
@@ -46,10 +54,42 @@ class CalendarsScreen extends ConsumerWidget {
     );
   }
 
+  Future<void> _onAction(
+    BuildContext context,
+    WidgetRef ref,
+    String action,
+    Map<String, dynamic> target,
+  ) async {
+    if (action == 'edit') {
+      final changed = await showDialog<bool>(
+        context: context,
+        builder: (_) => _EditTargetDialog(target: target),
+      );
+      if (changed == true) ref.invalidate(targetsProvider);
+    } else if (action == 'delete') {
+      final confirm = await showDialog<bool>(
+        context: context,
+        builder: (_) => AlertDialog(
+          title: const Text('Delete connection?'),
+          content: Text('Remove "${target['name']}"? This cannot be undone.'),
+          actions: [
+            TextButton(onPressed: () => Navigator.of(context).pop(false), child: const Text('Cancel')),
+            FilledButton(onPressed: () => Navigator.of(context).pop(true), child: const Text('Delete')),
+          ],
+        ),
+      );
+      if (confirm == true) {
+        final familyId = await ref.read(familyProvider.future);
+        await ref.read(apiClientProvider).deleteCalendarTarget(familyId, target['id'] as String);
+        ref.invalidate(targetsProvider);
+      }
+    }
+  }
+
   IconData _iconFor(String method) => switch (method) {
         'email' => Icons.mail_outline,
         'google' => Icons.calendar_month,
-        _ => Icons.cloud_outlined, // caldav
+        _ => Icons.cloud_outlined,
       };
 
   String _methodLabel(Map<String, dynamic> t) {
@@ -61,7 +101,93 @@ class CalendarsScreen extends ConsumerWidget {
   }
 }
 
-/// Full-page guided connect form.
+/// Rename + pause/resume an existing connection. (Changing the calendar or
+/// credentials = delete and reconnect.)
+class _EditTargetDialog extends ConsumerStatefulWidget {
+  const _EditTargetDialog({required this.target});
+  final Map<String, dynamic> target;
+
+  @override
+  ConsumerState<_EditTargetDialog> createState() => _EditTargetDialogState();
+}
+
+class _EditTargetDialogState extends ConsumerState<_EditTargetDialog> {
+  late final TextEditingController _name =
+      TextEditingController(text: widget.target['name'] as String? ?? '');
+  late bool _active = widget.target['active'] as bool? ?? true;
+  bool _busy = false;
+  String? _error;
+
+  @override
+  void dispose() {
+    _name.dispose();
+    super.dispose();
+  }
+
+  Future<void> _save() async {
+    setState(() {
+      _busy = true;
+      _error = null;
+    });
+    try {
+      final familyId = await ref.read(familyProvider.future);
+      await ref.read(apiClientProvider).updateCalendarTarget(
+            familyId,
+            widget.target['id'] as String,
+            name: _name.text.trim(),
+            active: _active,
+          );
+      if (mounted) Navigator.of(context).pop(true);
+    } catch (e) {
+      setState(() => _error = '$e');
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: const Text('Edit connection'),
+      content: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          TextField(
+            controller: _name,
+            decoration: const InputDecoration(labelText: 'Connection name'),
+          ),
+          SwitchListTile(
+            value: _active,
+            onChanged: (v) => setState(() => _active = v),
+            title: const Text('Active'),
+            subtitle: const Text('Deliver tasks to this calendar'),
+            contentPadding: EdgeInsets.zero,
+          ),
+          if (_error != null)
+            Padding(
+              padding: const EdgeInsets.only(top: 8),
+              child: Text(_error!, style: TextStyle(color: Theme.of(context).colorScheme.error)),
+            ),
+        ],
+      ),
+      actions: [
+        TextButton(
+          onPressed: _busy ? null : () => Navigator.of(context).pop(false),
+          child: const Text('Cancel'),
+        ),
+        FilledButton(
+          onPressed: _busy ? null : _save,
+          child: _busy
+              ? const SizedBox(height: 18, width: 18, child: CircularProgressIndicator(strokeWidth: 2))
+              : const Text('Save'),
+        ),
+      ],
+    );
+  }
+}
+
+enum _Provider { email, icloud, genericCaldav, google }
+
 class ConnectCalendarPage extends ConsumerStatefulWidget {
   const ConnectCalendarPage({super.key});
 
@@ -69,25 +195,26 @@ class ConnectCalendarPage extends ConsumerStatefulWidget {
   ConsumerState<ConnectCalendarPage> createState() => _ConnectCalendarPageState();
 }
 
-enum _Provider { email, icloud, genericCaldav, google }
-
 class _ConnectCalendarPageState extends ConsumerState<ConnectCalendarPage> {
   _Provider _provider = _Provider.email;
   String? _memberId;
   final _name = TextEditingController();
-  final _address = TextEditingController(); // email / CalDAV URL
+  final _address = TextEditingController(); // email, or CalDAV server URL
   final _username = TextEditingController();
   final _password = TextEditingController();
   final _calendarId = TextEditingController(text: 'primary');
   final _accessToken = TextEditingController();
+
+  // CalDAV discovery state.
+  List<Map<String, dynamic>> _discovered = const [];
+  String? _selectedCalendarUrl;
+  bool _discovering = false;
+
   bool _busy = false;
   String? _error;
 
-  @override
-  void initState() {
-    super.initState();
-    if (_provider == _Provider.icloud) _address.text = 'https://caldav.icloud.com';
-  }
+  bool get _isCalDav =>
+      _provider == _Provider.icloud || _provider == _Provider.genericCaldav;
 
   @override
   void dispose() {
@@ -100,21 +227,49 @@ class _ConnectCalendarPageState extends ConsumerState<ConnectCalendarPage> {
   void _onProviderChanged(_Provider p) {
     setState(() {
       _provider = p;
-      if (p == _Provider.icloud && !_address.text.startsWith('http')) {
+      _discovered = const [];
+      _selectedCalendarUrl = null;
+      if (p == _Provider.icloud) {
         _address.text = 'https://caldav.icloud.com';
+      } else if (p == _Provider.genericCaldav && _address.text == 'https://caldav.icloud.com') {
+        _address.clear();
       }
     });
   }
 
+  Future<void> _fetchCalendars() async {
+    setState(() {
+      _discovering = true;
+      _error = null;
+    });
+    try {
+      final familyId = await ref.read(familyProvider.future);
+      final cals = await ref.read(apiClientProvider).discoverCalDavCalendars(
+            familyId,
+            serverUrl: _address.text.trim(),
+            username: _username.text.trim(),
+            password: _password.text,
+          );
+      setState(() {
+        _discovered = cals.cast<Map<String, dynamic>>();
+        _selectedCalendarUrl =
+            _discovered.isNotEmpty ? _discovered.first['url'] as String : null;
+        if (_discovered.isEmpty) _error = 'No calendars found for those credentials';
+      });
+    } catch (e) {
+      setState(() => _error = '$e');
+    } finally {
+      if (mounted) setState(() => _discovering = false);
+    }
+  }
+
   Future<void> _save() async {
-    if (_memberId == null) {
-      setState(() => _error = 'Pick a caretaker');
-      return;
+    if (_memberId == null) return setState(() => _error = 'Pick a caretaker');
+    if (_name.text.trim().isEmpty) return setState(() => _error = 'Give the connection a name');
+    if (_isCalDav && _selectedCalendarUrl == null) {
+      return setState(() => _error = 'Fetch and pick a calendar first');
     }
-    if (_name.text.trim().isEmpty) {
-      setState(() => _error = 'Give the connection a name');
-      return;
-    }
+
     setState(() {
       _busy = true;
       _error = null;
@@ -134,14 +289,10 @@ class _ConnectCalendarPageState extends ConsumerState<ConnectCalendarPage> {
           method = 'email';
           addressOrUrl = _address.text.trim();
         case _Provider.icloud:
-          method = 'caldav';
-          providerHint = 'icloud';
-          addressOrUrl = _address.text.trim();
-          credential = {'username': _username.text.trim(), 'password': _password.text};
         case _Provider.genericCaldav:
           method = 'caldav';
-          providerHint = 'generic_caldav';
-          addressOrUrl = _address.text.trim();
+          providerHint = _provider == _Provider.icloud ? 'icloud' : 'generic_caldav';
+          addressOrUrl = _selectedCalendarUrl!;
           credential = {'username': _username.text.trim(), 'password': _password.text};
         case _Provider.google:
           method = 'google';
@@ -246,54 +397,63 @@ class _ConnectCalendarPageState extends ConsumerState<ConnectCalendarPage> {
           TextField(
             controller: _address,
             keyboardType: TextInputType.emailAddress,
-            decoration: const InputDecoration(
-              labelText: 'Delivery email',
-              hintText: 'you@example.com',
-            ),
+            decoration: const InputDecoration(labelText: 'Delivery email', hintText: 'you@example.com'),
           ),
-          const _Hint('A full-detail invite is emailed here (accept/decline supported). '
-              'Note: outbound email is currently disabled until a paid plan is enabled.'),
+          const _Hint('A full-detail invite is emailed here. Note: outbound email is '
+              'currently disabled until a paid plan is enabled.'),
         ];
       case _Provider.icloud:
-        return [
-          TextField(
-            controller: _address,
-            decoration: const InputDecoration(labelText: 'CalDAV URL'),
-          ),
-          const SizedBox(height: 12),
-          TextField(
-            controller: _username,
-            decoration: const InputDecoration(labelText: 'Apple ID email'),
-          ),
-          const SizedBox(height: 12),
-          TextField(
-            controller: _password,
-            obscureText: true,
-            decoration: const InputDecoration(labelText: 'App-specific password'),
-          ),
-          const _Hint('Create an app-specific password at appleid.apple.com → Sign-In '
-              'and Security → App-Specific Passwords.'),
-        ];
       case _Provider.genericCaldav:
         return [
           TextField(
             controller: _address,
             decoration: const InputDecoration(
-              labelText: 'CalDAV collection URL',
-              hintText: 'https://…/calendars/home/',
+              labelText: 'CalDAV server URL',
+              hintText: 'https://caldav.icloud.com',
             ),
           ),
           const SizedBox(height: 12),
           TextField(
             controller: _username,
-            decoration: const InputDecoration(labelText: 'Username'),
+            decoration: InputDecoration(
+              labelText: _provider == _Provider.icloud ? 'Apple ID email' : 'Username',
+            ),
           ),
           const SizedBox(height: 12),
           TextField(
             controller: _password,
             obscureText: true,
-            decoration: const InputDecoration(labelText: 'Password'),
+            decoration: InputDecoration(
+              labelText: _provider == _Provider.icloud ? 'App-specific password' : 'Password',
+            ),
           ),
+          if (_provider == _Provider.icloud)
+            const _Hint('Create an app-specific password at appleid.apple.com → Sign-In '
+                'and Security → App-Specific Passwords.'),
+          const SizedBox(height: 12),
+          OutlinedButton.icon(
+            onPressed: _discovering ? null : _fetchCalendars,
+            icon: _discovering
+                ? const SizedBox(height: 16, width: 16, child: CircularProgressIndicator(strokeWidth: 2))
+                : const Icon(Icons.search),
+            label: const Text('Fetch calendars'),
+          ),
+          if (_discovered.isNotEmpty) ...[
+            const SizedBox(height: 12),
+            DropdownButtonFormField<String>(
+              initialValue: _selectedCalendarUrl,
+              decoration: const InputDecoration(labelText: 'Calendar'),
+              items: [
+                for (final cal in _discovered)
+                  DropdownMenuItem(
+                    value: cal['url'] as String,
+                    child: Text(cal['displayName'] as String,
+                        maxLines: 1, overflow: TextOverflow.ellipsis),
+                  ),
+              ],
+              onChanged: (v) => setState(() => _selectedCalendarUrl = v),
+            ),
+          ],
         ];
       case _Provider.google:
         return [

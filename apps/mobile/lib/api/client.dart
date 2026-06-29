@@ -171,4 +171,48 @@ class ApiClient {
     );
     return _obj(res);
   }
+
+  /// Discover the calendars available for a set of CalDAV credentials.
+  /// Returns a list of `{ url, displayName }`.
+  Future<List<dynamic>> discoverCalDavCalendars(
+    String familyId, {
+    required String serverUrl,
+    required String username,
+    required String password,
+  }) async {
+    final res = await _dio.post(
+      '/families/$familyId/caldav/discover',
+      data: {'serverUrl': serverUrl, 'username': username, 'password': password},
+      options: _auth,
+    );
+    return _list(res, 'calendars');
+  }
+
+  Future<void> updateCalendarTarget(
+    String familyId,
+    String targetId, {
+    String? name,
+    bool? active,
+    String? addressOrUrl,
+    String? externalCalendarId,
+    String? providerHint,
+    Map<String, String>? credential,
+  }) async {
+    await _dio.patch(
+      '/families/$familyId/calendar-targets/$targetId',
+      data: {
+        if (name != null) 'name': name,
+        if (active != null) 'active': active,
+        if (addressOrUrl != null) 'addressOrUrl': addressOrUrl,
+        if (externalCalendarId != null) 'externalCalendarId': externalCalendarId,
+        if (providerHint != null) 'providerHint': providerHint,
+        if (credential != null) 'credential': credential,
+      },
+      options: _auth,
+    );
+  }
+
+  Future<void> deleteCalendarTarget(String familyId, String targetId) async {
+    await _dio.delete('/families/$familyId/calendar-targets/$targetId', options: _auth);
+  }
 }

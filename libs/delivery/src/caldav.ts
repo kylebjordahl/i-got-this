@@ -12,6 +12,15 @@ import type {
  * app-specific password). Network-dependent; verified against a live server
  * rather than in unit tests.
  */
+/** The account/server root for a calendar collection URL (for client discovery). */
+function serverRoot(collectionUrl: string): string {
+  try {
+    return new URL(collectionUrl).origin;
+  } catch {
+    return collectionUrl;
+  }
+}
+
 export class CalDavProvider implements DeliveryProvider {
   readonly method = 'caldav' as const;
 
@@ -19,8 +28,10 @@ export class CalDavProvider implements DeliveryProvider {
     if (target.credential?.kind !== 'basic') {
       throw new Error('caldav target requires a basic credential');
     }
+    // addressOrUrl is the specific calendar collection; the client connects to
+    // the server root and writes the event into that collection.
     const client = await createCalDavClient({
-      serverUrl: target.addressOrUrl,
+      serverUrl: serverRoot(target.addressOrUrl),
       username: target.credential.username,
       password: target.credential.password,
     });
@@ -44,7 +55,7 @@ export class CalDavProvider implements DeliveryProvider {
   async cancel(event: DeliveryEvent, target: DeliveryTarget): Promise<void> {
     if (target.credential?.kind !== 'basic') return;
     const client = await createCalDavClient({
-      serverUrl: target.addressOrUrl,
+      serverUrl: serverRoot(target.addressOrUrl),
       username: target.credential.username,
       password: target.credential.password,
     });

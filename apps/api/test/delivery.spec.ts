@@ -1,5 +1,5 @@
 import { env } from 'cloudflare:test';
-import { calendarTargets, deliveries, eq, getDb, tasks } from '@igt/db';
+import { calendarTargets, deliveries, eq, getDb, secrets, tasks } from '@igt/db';
 import {
   type DeliveryEvent,
   type DeliveryProvider,
@@ -159,5 +159,61 @@ describe('calendar targets', () => {
     const list = await call(`/families/${familyId}/calendar-targets`, bearer(admin.token));
     const { targets } = (await list.json()) as { targets: unknown[] };
     expect(targets.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it('edits a target and deletes it (cleaning up its secret)', async () => {
+    const { admin, familyId, memberId } = await adminFamily('edit-admin@example.com');
+    const db = getDb(env.DB);
+
+    const created = await call(
+      `/families/${familyId}/calendar-targets`,
+      authed(admin.token, {
+        memberId,
+        name: 'iCloud',
+        method: 'caldav',
+        providerHint: 'icloud',
+        addressOrUrl: 'https://caldav.icloud.com/123/calendars/home/',
+        credential: { username: 'me@icloud.com', password: 'pw' },
+      }),
+    );
+    const targetId = ((await created.json()) as { target: { id: string } }).target.id;
+    const before = (
+      await db.select().from(calendarTargets).where(eq(calendarTargets.id, targetId)).limit(1)
+    )[0]!;
+    expect(before.credentialsRef).toBeTruthy();
+
+    // Edit name + active.
+    const patch = await call(`/families/${familyId}/calendar-targets/${targetId}`, {
+      method: 'PATCH',
+      headers: { Authorization: `Bearer ${admin.token}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ name: 'Personal iCloud', active: false }),
+    });
+    expect(patch.status).toBe(200);
+    const patched = ((await patch.json()) as {
+      target: { name: string; active: boolean };
+    }).target;
+    expect(patched.name).toBe('Personal iCloud');
+    expect(patched.active).toBe(false);
+    expect('credentialsRef' in (patched as Record<string, unknown>)).toBe(false);
+
+    // Delete → row + secret gone.
+    const del = await call(`/families/${familyId}/calendar-targets/${targetId}`, {
+      method: 'DELETE',
+      headers: { Authorization: `Bearer ${admin.token}` },
+    });
+    expect(del.status).toBe(200);
+
+    const after = await db
+      .select()
+      .from(calendarTargets)
+      .where(eq(calendarTargets.id, targetId))
+      .limit(1);
+    expect(after).toHaveLength(0);
+    const secretGone = await db
+      .select()
+      .from(secrets)
+      .where(eq(secrets.id, before.credentialsRef!))
+      .limit(1);
+    expect(secretGone).toHaveLength(0);
   });
 });

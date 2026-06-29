@@ -1,15 +1,33 @@
 import {
   and,
   calendarTargets,
+  type Db,
   eq,
   familyMembers,
   getDb,
+  secrets,
 } from '@igt/db';
-import { CreateCalendarTargetInput } from '@igt/domain';
+import {
+  CalDavDiscoverInput,
+  CreateCalendarTargetInput,
+  UpdateCalendarTargetInput,
+} from '@igt/domain';
+import { createCalDavClient } from '@igt/ical';
 import { Hono } from 'hono';
 import type { HonoEnv } from '../env.js';
 import { requireFamilyMember } from '../middleware/auth.js';
 import { storeSecret } from '../lib/secrets.js';
+
+/** Load a target with the family it belongs to (for tenancy + ownership checks). */
+async function loadTarget(db: Db, targetId: string) {
+  const rows = await db
+    .select({ target: calendarTargets, familyId: familyMembers.familyId })
+    .from(calendarTargets)
+    .innerJoin(familyMembers, eq(familyMembers.id, calendarTargets.memberId))
+    .where(eq(calendarTargets.id, targetId))
+    .limit(1);
+  return rows[0] ?? null;
+}
 
 /** Mounted under /families/:familyId (auth applied by parent router). */
 export const targetRoutes = new Hono<HonoEnv>();
@@ -112,4 +130,94 @@ targetRoutes.get('/calendar-targets', async (c) => {
     : await base.where(eq(calendarTargets.memberId, me.id));
 
   return c.json({ targets: rows });
+});
+
+/**
+ * Discover the CalDAV calendars available for a set of credentials (no storage).
+ * The client uses this to let the caretaker pick which calendar to write to.
+ */
+targetRoutes.post('/caldav/discover', async (c) => {
+  const parsed = CalDavDiscoverInput.safeParse(await c.req.json().catch(() => null));
+  if (!parsed.success) {
+    return c.json({ error: 'invalid', issues: parsed.error.issues }, 400);
+  }
+  try {
+    const client = await createCalDavClient({
+      serverUrl: parsed.data.serverUrl,
+      username: parsed.data.username,
+      password: parsed.data.password,
+    });
+    const calendars = await client.fetchCalendars();
+    const list = calendars.map((cal) => ({
+      url: cal.url,
+      displayName:
+        typeof cal.displayName === 'string' && cal.displayName.length > 0
+          ? cal.displayName
+          : cal.url,
+    }));
+    return c.json({ calendars: list });
+  } catch (err) {
+    return c.json({ error: 'discover_failed', message: String(err) }, 400);
+  }
+});
+
+/** Update a calendar target (own; admins any). Credentials are re-encrypted. */
+targetRoutes.patch('/calendar-targets/:targetId', async (c) => {
+  const parsed = UpdateCalendarTargetInput.safeParse(await c.req.json().catch(() => null));
+  if (!parsed.success) {
+    return c.json({ error: 'invalid', issues: parsed.error.issues }, 400);
+  }
+  const db = getDb(c.env.DB);
+  const me = c.get('member');
+  const found = await loadTarget(db, c.req.param('targetId'));
+  if (!found || found.familyId !== me.familyId) return c.json({ error: 'not_found' }, 404);
+  if (found.target.memberId !== me.id && !me.isAdmin) {
+    return c.json({ error: 'forbidden' }, 403);
+  }
+
+  const d = parsed.data;
+  const set: Partial<typeof calendarTargets.$inferInsert> = {};
+  if (d.name !== undefined) set.name = d.name;
+  if (d.active !== undefined) set.active = d.active;
+  if (d.addressOrUrl !== undefined) set.addressOrUrl = d.addressOrUrl;
+  if (d.externalCalendarId !== undefined) set.externalCalendarId = d.externalCalendarId;
+  if (d.providerHint !== undefined) set.providerHint = d.providerHint;
+
+  if (d.credential && (d.credential.password || d.credential.accessToken)) {
+    if (!c.env.KEK) return c.json({ error: 'kek_unconfigured' }, 500);
+    const payload =
+      found.target.method === 'google'
+        ? { kind: 'oauth', accessToken: d.credential.accessToken }
+        : { kind: 'basic', username: d.credential.username, password: d.credential.password };
+    set.credentialsRef = await storeSecret(db, c.env.KEK, me.familyId, JSON.stringify(payload));
+    if (found.target.credentialsRef) {
+      await db.delete(secrets).where(eq(secrets.id, found.target.credentialsRef));
+    }
+  }
+
+  if (Object.keys(set).length > 0) {
+    await db.update(calendarTargets).set(set).where(eq(calendarTargets.id, found.target.id));
+  }
+  const updated = (
+    await db.select().from(calendarTargets).where(eq(calendarTargets.id, found.target.id)).limit(1)
+  )[0]!;
+  const { credentialsRef: _omit, ...safe } = updated;
+  return c.json({ target: safe });
+});
+
+/** Delete a calendar target (own; admins any) + its stored credential. */
+targetRoutes.delete('/calendar-targets/:targetId', async (c) => {
+  const db = getDb(c.env.DB);
+  const me = c.get('member');
+  const found = await loadTarget(db, c.req.param('targetId'));
+  if (!found || found.familyId !== me.familyId) return c.json({ error: 'not_found' }, 404);
+  if (found.target.memberId !== me.id && !me.isAdmin) {
+    return c.json({ error: 'forbidden' }, 403);
+  }
+
+  await db.delete(calendarTargets).where(eq(calendarTargets.id, found.target.id));
+  if (found.target.credentialsRef) {
+    await db.delete(secrets).where(eq(secrets.id, found.target.credentialsRef));
+  }
+  return c.json({ ok: true });
 });
