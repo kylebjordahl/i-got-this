@@ -34,6 +34,9 @@ describe('EmailImipProvider', () => {
     expect(sent[0]!.mime).toContain('Content-Type: text/calendar; method=REQUEST');
     expect(sent[0]!.mime).toContain('METHOD:REQUEST');
     expect(sent[0]!.mime).toContain('UID:igt-task-1-target-1');
+    // RFC 5322 headers required by strict senders (Cloudflare Email Service).
+    expect(sent[0]!.mime).toMatch(/^Date: /m);
+    expect(sent[0]!.mime).toMatch(/^Message-ID: <.+@igt\.test>/m);
   });
 });
 

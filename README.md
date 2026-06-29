@@ -59,8 +59,11 @@ pnpm nx run @igt/api:db-migrate-local   # apply migrations to local D1
   claim/release with idempotent rebuilds.
 - **Phase 4 (delivery):** ✅ calendar-target CRUD, envelope-encrypted secrets
   (AES-256-GCM), delivery orchestration + providers (Email iMIP, CalDAV/tsdav,
-  Google REST). Email send wiring to Cloudflare Email Service + live CalDAV/
-  Google verification are the remaining production hookups.
+  Google REST). **Email is intentionally disconnected** (Cloudflare Email Service
+  needs a paid plan): the provider is opt-in on the `EMAIL` `send_email` binding,
+  which is commented out in `wrangler.jsonc` — email targets are skipped until it's
+  enabled (uncomment + verify a sending domain + set `ORGANIZER_EMAIL`). Live
+  CalDAV/Google verification also remains a production hookup.
 
 - **Phase 5 (Flutter client):** ⚠️ authored, **not yet verified** — no Flutter
   SDK in the build env. API client (`dio`), Riverpod auth state, magic-link login,

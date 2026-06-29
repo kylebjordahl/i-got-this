@@ -7,8 +7,10 @@ export interface Bindings {
   ENVIRONMENT: string;
   /** base64 of 32 random bytes; the key-encryption key for envelope encryption. */
   KEK?: string;
-  /** ORGANIZER email used on outbound iMIP invites. */
+  /** ORGANIZER email used on outbound iMIP invites (must be on the sending domain). */
   ORGANIZER_EMAIL?: string;
+  /** Cloudflare Email Service `send_email` binding (outbound iMIP). */
+  EMAIL?: SendEmail;
 }
 
 /** Per-request context set by middleware. */

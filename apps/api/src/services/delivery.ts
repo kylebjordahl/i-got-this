@@ -17,6 +17,7 @@ import {
   EmailImipProvider,
   GoogleCalendarProvider,
 } from '@igt/delivery';
+import { EmailMessage } from 'cloudflare:email';
 import type { Bindings } from '../env.js';
 import { loadSecret } from './../lib/secrets.js';
 
@@ -190,17 +191,25 @@ export async function cancelTaskDeliveries(
 }
 
 /**
- * Production provider registry. Email send is wired to Cloudflare Email Service
- * in a later step; until then the email sender throws (delivery is best-effort
- * at call sites, so assignment still succeeds).
+ * Production provider registry. CalDAV + Google are always available; email is
+ * **opt-in** and only wired when the Cloudflare Email Service `send_email`
+ * binding (env.EMAIL) is present — it requires a paid plan. While disconnected,
+ * email calendar targets are simply skipped by deliverTask (no errors). To
+ * enable later: declare the binding in wrangler.jsonc + verify a sending domain
+ * (see README / infra/terraform).
  */
 export function getProductionRegistry(env: Bindings): DeliveryProviderRegistry {
-  const organizer = env.ORGANIZER_EMAIL ?? 'noreply@example.com';
-  const send = async (_mime: string, _to: string): Promise<void> => {
-    throw new Error('Cloudflare Email Service send not yet wired (Phase 4 prod)');
-  };
-  return new DeliveryProviderRegistry()
-    .register(new EmailImipProvider(send, organizer))
+  const registry = new DeliveryProviderRegistry()
     .register(new CalDavProvider())
     .register(new GoogleCalendarProvider());
+
+  if (env.EMAIL) {
+    const organizer = env.ORGANIZER_EMAIL ?? 'noreply@example.com';
+    const emailBinding = env.EMAIL;
+    const send = async (mime: string, to: string): Promise<void> => {
+      await emailBinding.send(new EmailMessage(organizer, to, mime));
+    };
+    registry.register(new EmailImipProvider(send, organizer));
+  }
+  return registry;
 }
