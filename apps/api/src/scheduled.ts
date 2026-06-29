@@ -1,11 +1,14 @@
-import { eq, feeds, getDb } from '@igt/db';
+import { and, eq, families, feeds, getDb } from '@igt/db';
 import type { Bindings } from './env.js';
+import { getProductionRegistry, syncFamily } from './services/delivery.js';
 import { ingestFeed } from './services/ingest.js';
+import { buildFeedTasks } from './services/tasks.js';
 
 /**
- * Cron tick: ingest every active feed whose `refreshMinutes` has elapsed since
- * its last sync. Runs ingestion in the background (waitUntil) so the tick
- * returns quickly. A Queue can later wrap this for at-scale retry/backoff.
+ * Cron tick, per family: ingest + rebuild any feed whose refresh interval has
+ * elapsed, then run a true-up that reconciles every caretaker's calendars to
+ * their owned tasks. The reconcile is cheap when nothing drifted (payloadHash
+ * skips unchanged events), so it's safe to run every tick.
  */
 export async function scheduled(
   _event: ScheduledController,
@@ -13,17 +16,30 @@ export async function scheduled(
   ctx: ExecutionContext,
 ): Promise<void> {
   const db = getDb(env.DB);
+  const registry = getProductionRegistry(env);
   const now = Date.now();
-  const active = await db.select().from(feeds).where(eq(feeds.status, 'active'));
 
-  for (const feed of active) {
-    const last = feed.lastSyncedAt?.getTime() ?? 0;
-    if (now - last >= feed.refreshMinutes * 60 * 1000) {
-      ctx.waitUntil(
-        ingestFeed(db, feed).catch((err) =>
-          console.error(`scheduled ingest failed for ${feed.id}`, err),
-        ),
-      );
-    }
+  const allFamilies = await db.select().from(families);
+  for (const fam of allFamilies) {
+    ctx.waitUntil(
+      (async () => {
+        try {
+          const familyFeeds = await db
+            .select()
+            .from(feeds)
+            .where(and(eq(feeds.familyId, fam.id), eq(feeds.status, 'active')));
+          for (const feed of familyFeeds) {
+            const last = feed.lastSyncedAt?.getTime() ?? 0;
+            if (now - last >= feed.refreshMinutes * 60 * 1000) {
+              await ingestFeed(db, feed);
+              await buildFeedTasks(db, feed);
+            }
+          }
+          await syncFamily(db, registry, env.KEK, fam.id);
+        } catch (err) {
+          console.error(`scheduled tick failed for family ${fam.id}`, err);
+        }
+      })(),
+    );
   }
 }

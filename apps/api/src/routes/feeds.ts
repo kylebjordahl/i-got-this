@@ -5,6 +5,7 @@ import type { HonoEnv } from '../env.js';
 import { requireAdmin, requireFamilyMember } from '../middleware/auth.js';
 import { ingestFamilyFeeds, ingestFeed } from '../services/ingest.js';
 import { buildFeedTasks } from '../services/tasks.js';
+import { getProductionRegistry, syncFamily } from '../services/delivery.js';
 
 /** Mounted under /families/:familyId/feeds (auth applied by parent router). */
 export const feedRoutes = new Hono<HonoEnv>();
@@ -112,6 +113,11 @@ feedRoutes.post('/:feedId/refresh', async (c) => {
 
   const ingest = await ingestFeed(db, feed);
   const build = await buildFeedTasks(db, feed);
+  try {
+    await syncFamily(db, getProductionRegistry(c.env), c.env.KEK, c.get('member').familyId);
+  } catch (err) {
+    console.error('syncFamily (refresh) failed', err);
+  }
   return c.json({ ingest, build });
 });
 
@@ -125,6 +131,11 @@ feedRoutes.post('/refresh-all', async (c) => {
   const build = [];
   for (const feed of familyFeeds) {
     build.push(await buildFeedTasks(db, feed));
+  }
+  try {
+    await syncFamily(db, getProductionRegistry(c.env), c.env.KEK, familyId);
+  } catch (err) {
+    console.error('syncFamily (refresh-all) failed', err);
   }
   return c.json({ ingest, build });
 });

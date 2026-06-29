@@ -32,14 +32,15 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
   Future<void> _sync() async {
     final familyId = await ref.read(familyProvider.future);
     final res = await ref.read(apiClientProvider).resyncDeliveries(familyId);
-    final delivered = res['delivered'];
-    final owned = res['ownedTasks'];
-    final errors = (res['errors'] as List).length;
+    final created = res['created'] ?? 0;
+    final updated = res['updated'] ?? 0;
+    final removed = res['removed'] ?? 0;
+    final errors = (res['errors'] as List?)?.length ?? 0;
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
         content: Text(
-          'Synced $delivered delivery(s) across $owned owned task(s)'
+          'Calendars synced: $created added, $updated updated, $removed removed'
           '${errors > 0 ? ' · $errors error(s)' : ''}',
         ),
       ),

@@ -15,6 +15,13 @@
       "when": 1782624657392,
       "tag": "0001_auth",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1782754630792,
+      "tag": "0002_delivery_payload_hash",
+      "breakpoints": true
     }
   ]
 }

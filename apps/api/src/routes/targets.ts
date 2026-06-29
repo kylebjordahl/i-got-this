@@ -17,6 +17,11 @@ import { Hono } from 'hono';
 import type { HonoEnv } from '../env.js';
 import { requireFamilyMember } from '../middleware/auth.js';
 import { storeSecret } from '../lib/secrets.js';
+import {
+  getProductionRegistry,
+  purgeTargetRemote,
+  syncMember,
+} from '../services/delivery.js';
 
 /** Load a target with the family it belongs to (for tenancy + ownership checks). */
 async function loadTarget(db: Db, targetId: string) {
@@ -98,6 +103,13 @@ targetRoutes.post('/calendar-targets', async (c) => {
       })
       .returning()
   )[0]!;
+
+  // Reflect the owner's existing owned tasks onto the new calendar.
+  try {
+    await syncMember(db, getProductionRegistry(c.env), c.env.KEK, parsed.data.memberId);
+  } catch (err) {
+    console.error('syncMember (target create) failed', err);
+  }
 
   // Never return credential material.
   const { credentialsRef: _omit, ...safe } = row;
@@ -201,6 +213,14 @@ targetRoutes.patch('/calendar-targets/:targetId', async (c) => {
   const updated = (
     await db.select().from(calendarTargets).where(eq(calendarTargets.id, found.target.id)).limit(1)
   )[0]!;
+
+  // Reconcile after the change (active toggle, calendar switch, etc.).
+  try {
+    await syncMember(db, getProductionRegistry(c.env), c.env.KEK, found.target.memberId);
+  } catch (err) {
+    console.error('syncMember (target update) failed', err);
+  }
+
   const { credentialsRef: _omit, ...safe } = updated;
   return c.json({ target: safe });
 });
@@ -213,6 +233,13 @@ targetRoutes.delete('/calendar-targets/:targetId', async (c) => {
   if (!found || found.familyId !== me.familyId) return c.json({ error: 'not_found' }, 404);
   if (found.target.memberId !== me.id && !me.isAdmin) {
     return c.json({ error: 'forbidden' }, 403);
+  }
+
+  // Remove the events we put on the remote calendar before dropping the target.
+  try {
+    await purgeTargetRemote(db, getProductionRegistry(c.env), c.env.KEK, found.target);
+  } catch (err) {
+    console.error('purgeTargetRemote failed', err);
   }
 
   await db.delete(calendarTargets).where(eq(calendarTargets.id, found.target.id));

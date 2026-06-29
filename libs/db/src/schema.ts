@@ -345,6 +345,8 @@ export const deliveries = sqliteTable(
     externalRef: text('external_ref'),
     icalUid: text('ical_uid'),
     sequence: integer('sequence').notNull().default(0),
+    // Hash of the delivered event payload; lets reconcile skip unchanged events.
+    payloadHash: text('payload_hash'),
     rsvpStatus: text('rsvp_status', { enum: RsvpStatus.options })
       .notNull()
       .default('none'),

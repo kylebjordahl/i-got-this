@@ -9,7 +9,7 @@ import {
 import type { DeliveryMethod } from '@igt/domain';
 import { describe, expect, it } from 'vitest';
 import { decryptSecret, encryptSecret, loadSecret } from '../src/lib/secrets.js';
-import { cancelTaskDeliveries, deliverTask } from '../src/services/delivery.js';
+import { syncMember } from '../src/services/delivery.js';
 import { authed, bearer, call, login } from './helpers.js';
 
 class FakeProvider implements DeliveryProvider {
@@ -45,8 +45,8 @@ describe('envelope encryption', () => {
   });
 });
 
-describe('delivery orchestration', () => {
-  it('delivers an owned task, updates on redelivery, and cancels', async () => {
+describe('calendar reconcile (syncMember)', () => {
+  it('creates, skips unchanged, updates on change, and removes when unowned', async () => {
     const { admin, familyId, memberId } = await adminFamily('del-admin@example.com');
     const db = getDb(env.DB);
 
@@ -88,34 +88,41 @@ describe('delivery orchestration', () => {
     const fake = new FakeProvider('email');
     const registry = new DeliveryProviderRegistry().register(fake);
 
-    const n1 = await deliverTask(db, registry, env.KEK, task.id);
-    expect(n1).toBe(1);
+    // 1) First sync creates the event.
+    const r1 = await syncMember(db, registry, env.KEK, memberId);
+    expect(r1.created).toBe(1);
     expect(fake.upserts).toHaveLength(1);
     expect(fake.upserts[0]!.target.addressOrUrl).toBe('del-admin@example.com');
     expect(fake.upserts[0]!.event.summary).toBe('Pickup — child');
-
-    const d1 = (
-      await db.select().from(deliveries).where(eq(deliveries.taskId, task.id))
-    )[0]!;
+    const d1 = (await db.select().from(deliveries).where(eq(deliveries.taskId, task.id)))[0]!;
     expect(d1.status).toBe('sent');
     expect(d1.sequence).toBe(0);
 
-    // Redelivery updates + bumps sequence.
-    await deliverTask(db, registry, env.KEK, task.id);
-    const d2 = (
-      await db.select().from(deliveries).where(eq(deliveries.taskId, task.id))
-    )[0]!;
-    expect(d2.status).toBe('updated');
-    expect(d2.sequence).toBe(1);
+    // 2) Re-sync with no change is a no-op (payloadHash match).
+    const r2 = await syncMember(db, registry, env.KEK, memberId);
+    expect(r2.created).toBe(0);
+    expect(r2.updated).toBe(0);
+    expect(fake.upserts).toHaveLength(1);
 
-    // Cancel.
-    const c = await cancelTaskDeliveries(db, registry, env.KEK, task.id);
-    expect(c).toBe(1);
+    // 3) Changing the task updates the event + bumps sequence.
+    await db.update(tasks).set({ location: 'New School' }).where(eq(tasks.id, task.id));
+    const r3 = await syncMember(db, registry, env.KEK, memberId);
+    expect(r3.updated).toBe(1);
+    expect(fake.upserts).toHaveLength(2);
+    const d3 = (await db.select().from(deliveries).where(eq(deliveries.taskId, task.id)))[0]!;
+    expect(d3.status).toBe('updated');
+    expect(d3.sequence).toBe(1);
+
+    // 4) Unassigning removes the event from the calendar.
+    await db
+      .update(tasks)
+      .set({ ownerMemberId: null, status: 'unowned' })
+      .where(eq(tasks.id, task.id));
+    const r4 = await syncMember(db, registry, env.KEK, memberId);
+    expect(r4.removed).toBe(1);
     expect(fake.cancels).toHaveLength(1);
-    const d3 = (
-      await db.select().from(deliveries).where(eq(deliveries.taskId, task.id))
-    )[0]!;
-    expect(d3.status).toBe('cancelled');
+    const after = await db.select().from(deliveries).where(eq(deliveries.taskId, task.id));
+    expect(after).toHaveLength(0);
   });
 });
 
@@ -218,8 +225,8 @@ describe('calendar targets', () => {
   });
 });
 
-describe('resync deliveries', () => {
-  it('reports owned tasks and delivers to none when there are no targets', async () => {
+describe('resync deliveries (family true-up)', () => {
+  it('reconciles with no targets as a no-op', async () => {
     const { admin, familyId, memberId } = await adminFamily('resync-admin@example.com');
     const db = getDb(env.DB);
 
@@ -243,12 +250,13 @@ describe('resync deliveries', () => {
     const res = await call(`/families/${familyId}/tasks/resync-deliveries`, authed(admin.token));
     expect(res.status).toBe(200);
     const body = (await res.json()) as {
-      ownedTasks: number;
-      delivered: number;
+      targets: number;
+      created: number;
+      removed: number;
       errors: unknown[];
     };
-    expect(body.ownedTasks).toBeGreaterThanOrEqual(1);
-    expect(body.delivered).toBe(0);
+    expect(body.targets).toBe(0);
+    expect(body.created).toBe(0);
     expect(body.errors).toHaveLength(0);
   });
 });

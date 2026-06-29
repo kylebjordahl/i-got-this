@@ -12,9 +12,9 @@ import { Hono } from 'hono';
 import type { HonoEnv } from '../env.js';
 import { requireAdmin, requireFamilyMember } from '../middleware/auth.js';
 import {
-  cancelTaskDeliveries,
-  deliverTask,
   getProductionRegistry,
+  syncFamily,
+  syncMember,
 } from '../services/delivery.js';
 
 /** Mounted under /families/:familyId (auth applied by parent router). */
@@ -132,11 +132,11 @@ taskRoutes.post('/tasks/:taskId/assign', async (c) => {
       .returning()
   )[0]!;
 
-  // Best-effort: push to the owner's calendars. Assignment succeeds regardless.
+  // Best-effort: reconcile the new owner's calendars. Assignment succeeds regardless.
   try {
-    await deliverTask(db, getProductionRegistry(c.env), c.env.KEK, updated.id);
+    await syncMember(db, getProductionRegistry(c.env), c.env.KEK, targetMemberId);
   } catch (err) {
-    console.error('deliverTask failed', err);
+    console.error('syncMember (assign) failed', err);
   }
   return c.json({ task: updated });
 });
@@ -155,12 +155,7 @@ taskRoutes.post('/tasks/:taskId/unassign', async (c) => {
   )[0];
   if (!task) return c.json({ error: 'task_not_found' }, 404);
 
-  try {
-    await cancelTaskDeliveries(db, getProductionRegistry(c.env), c.env.KEK, task.id);
-  } catch (err) {
-    console.error('cancelTaskDeliveries failed', err);
-  }
-
+  const formerOwner = task.ownerMemberId;
   const updated = (
     await db
       .update(tasks)
@@ -168,6 +163,15 @@ taskRoutes.post('/tasks/:taskId/unassign', async (c) => {
       .where(eq(tasks.id, task.id))
       .returning()
   )[0]!;
+
+  // Reconcile the former owner's calendars (the event is no longer desired).
+  if (formerOwner) {
+    try {
+      await syncMember(db, getProductionRegistry(c.env), c.env.KEK, formerOwner);
+    } catch (err) {
+      console.error('syncMember (unassign) failed', err);
+    }
+  }
   return c.json({ task: updated });
 });
 
@@ -179,20 +183,6 @@ taskRoutes.post('/tasks/:taskId/unassign', async (c) => {
 taskRoutes.post('/tasks/resync-deliveries', async (c) => {
   const db = getDb(c.env.DB);
   const me = c.get('member');
-  const owned = await db
-    .select()
-    .from(tasks)
-    .where(and(eq(tasks.familyId, me.familyId), eq(tasks.status, 'owned')));
-
-  const registry = getProductionRegistry(c.env);
-  let delivered = 0;
-  const errors: { taskId: string; error: string }[] = [];
-  for (const t of owned) {
-    try {
-      delivered += await deliverTask(db, registry, c.env.KEK, t.id);
-    } catch (err) {
-      errors.push({ taskId: t.id, error: String(err) });
-    }
-  }
-  return c.json({ ownedTasks: owned.length, delivered, errors });
+  const result = await syncFamily(db, getProductionRegistry(c.env), c.env.KEK, me.familyId);
+  return c.json(result);
 });

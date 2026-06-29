@@ -22,16 +22,48 @@ import type { Bindings } from '../env.js';
 import { loadSecret } from './../lib/secrets.js';
 
 type TaskRow = typeof tasks.$inferSelect;
-type MemberRow = typeof familyMembers.$inferSelect;
+type TargetRow = typeof calendarTargets.$inferSelect;
 
-function taskSummary(task: TaskRow, child: MemberRow | undefined): string {
+/**
+ * Reconcile model: a caretaker's owned tasks form their "generated calendar".
+ * We continuously reflect that onto each of their configured outputs (targets) —
+ * creating, updating, and removing events so the output always matches intent.
+ * `delivery.payloadHash` lets a true-up skip unchanged events (no network).
+ */
+
+export interface SyncResult {
+  targets: number;
+  created: number;
+  updated: number;
+  removed: number;
+  errors: { targetId: string; taskId?: string; error: string }[];
+}
+
+function emptyResult(): SyncResult {
+  return { targets: 0, created: 0, updated: 0, removed: 0, errors: [] };
+}
+
+function taskSummary(task: TaskRow, childName: string): string {
   const label =
     task.type === 'pickup'
       ? 'Pickup'
       : task.type === 'dropoff'
         ? 'Drop-off'
         : 'Attendance';
-  return `${label} — ${child?.relationName ?? 'child'}`;
+  return `${label} — ${childName}`;
+}
+
+/** djb2 over the meaningful event fields; cheap + synchronous. */
+function hashEvent(summary: string, task: TaskRow): string {
+  const parts = [
+    summary,
+    task.dtstart.toISOString(),
+    task.dtend ? task.dtend.toISOString() : '',
+    task.location ?? '',
+  ].join('|');
+  let h = 5381;
+  for (let i = 0; i < parts.length; i++) h = ((h << 5) + h) ^ parts.charCodeAt(i);
+  return (h >>> 0).toString(16);
 }
 
 async function resolveCredential(
@@ -44,159 +76,212 @@ async function resolveCredential(
   return raw ? (JSON.parse(raw) as DeliveryCredential) : undefined;
 }
 
-/**
- * Deliver an owned task to each of the owner's active calendar targets. Creates
- * or updates one `delivery` row per (task, target); re-delivery bumps SEQUENCE.
- * No-op when the task is unowned or the owner has no targets.
- */
-export async function deliverTask(
+async function familyMemberNames(db: Db, familyId: string): Promise<Map<string, string>> {
+  const members = await db
+    .select()
+    .from(familyMembers)
+    .where(eq(familyMembers.familyId, familyId));
+  return new Map(members.map((m) => [m.id, m.relationName]));
+}
+
+/** Reconcile a single target so it reflects exactly its owner's owned tasks. */
+async function syncTarget(
   db: Db,
   registry: DeliveryProviderRegistry,
   kek: string | undefined,
-  taskId: string,
-): Promise<number> {
-  const task = (await db.select().from(tasks).where(eq(tasks.id, taskId)).limit(1))[0];
-  if (!task || !task.ownerMemberId) return 0;
+  target: TargetRow,
+  childNames: Map<string, string>,
+  result: SyncResult,
+): Promise<void> {
+  result.targets++;
+  if (!registry.has(target.method)) return; // provider unavailable (e.g. email off)
 
-  const child = (
-    await db
-      .select()
-      .from(familyMembers)
-      .where(eq(familyMembers.id, task.familyMemberId))
-      .limit(1)
-  )[0];
+  const credential = await resolveCredential(db, kek, target.credentialsRef);
+  const deliveryTarget: DeliveryTarget = {
+    method: target.method,
+    addressOrUrl: target.addressOrUrl,
+    externalCalendarId: target.externalCalendarId ?? undefined,
+    credential,
+  };
+  const provider = registry.get(target.method);
 
-  const targets = await db
-    .select()
-    .from(calendarTargets)
-    .where(
-      and(
-        eq(calendarTargets.memberId, task.ownerMemberId),
-        eq(calendarTargets.active, true),
-      ),
-    );
-
-  let delivered = 0;
-  for (const target of targets) {
-    if (!registry.has(target.method)) continue;
-
-    const existing = (
-      await db
+  // Desired = owner's owned tasks (none when the target is paused).
+  const desired = target.active
+    ? await db
         .select()
-        .from(deliveries)
-        .where(
-          and(
-            eq(deliveries.taskId, task.id),
-            eq(deliveries.calendarTargetId, target.id),
-          ),
-        )
-        .limit(1)
-    )[0];
+        .from(tasks)
+        .where(and(eq(tasks.ownerMemberId, target.memberId), eq(tasks.status, 'owned')))
+    : [];
+  const desiredById = new Map(desired.map((t) => [t.id, t]));
 
-    const uid = existing?.icalUid ?? `igt-${task.id}-${target.id}`;
-    const sequence = existing ? existing.sequence + 1 : 0;
-    const credential = await resolveCredential(db, kek, target.credentialsRef);
+  const existing = await db
+    .select()
+    .from(deliveries)
+    .where(
+      and(eq(deliveries.calendarTargetId, target.id), ne(deliveries.status, 'cancelled')),
+    );
+  const existingByTask = new Map(existing.map((d) => [d.taskId, d]));
 
+  // Remove events whose task is no longer desired.
+  for (const d of existing) {
+    if (desiredById.has(d.taskId)) continue;
+    try {
+      await provider.cancel(
+        {
+          uid: d.icalUid ?? `igt-${d.taskId}-${target.id}`,
+          sequence: d.sequence + 1,
+          start: new Date(),
+          end: null,
+          summary: 'Cancelled',
+        },
+        deliveryTarget,
+      );
+    } catch (err) {
+      result.errors.push({ targetId: target.id, taskId: d.taskId, error: String(err) });
+    }
+    await db.delete(deliveries).where(eq(deliveries.id, d.id));
+    result.removed++;
+  }
+
+  // Create/update desired events (skip unchanged via payloadHash).
+  for (const task of desired) {
+    const summary = taskSummary(task, childNames.get(task.familyMemberId) ?? 'child');
+    const hash = hashEvent(summary, task);
+    const prior = existingByTask.get(task.id);
+    if (prior && prior.payloadHash === hash) continue;
+
+    const uid = prior?.icalUid ?? `igt-${task.id}-${target.id}`;
+    const sequence = prior ? prior.sequence + 1 : 0;
     const event: DeliveryEvent = {
       uid,
       sequence,
       start: task.dtstart,
       end: task.dtend,
-      summary: taskSummary(task, child),
+      summary,
       location: task.location ?? undefined,
     };
-    const deliveryTarget: DeliveryTarget = {
-      method: target.method,
-      addressOrUrl: target.addressOrUrl,
-      externalCalendarId: target.externalCalendarId ?? undefined,
-      credential,
-    };
-
-    const result = await registry.get(target.method).upsert(event, deliveryTarget);
-
-    if (existing) {
-      await db
-        .update(deliveries)
-        .set({
-          status: 'updated',
+    try {
+      const res = await provider.upsert(event, deliveryTarget);
+      if (prior) {
+        await db
+          .update(deliveries)
+          .set({
+            status: 'updated',
+            sequence,
+            externalRef: res.externalRef ?? prior.externalRef,
+            payloadHash: hash,
+            sentAt: new Date(),
+          })
+          .where(eq(deliveries.id, prior.id));
+        result.updated++;
+      } else {
+        await db.insert(deliveries).values({
+          taskId: task.id,
+          calendarTargetId: target.id,
+          method: target.method,
+          status: 'sent',
+          externalRef: res.externalRef ?? null,
+          icalUid: uid,
           sequence,
-          externalRef: result.externalRef ?? existing.externalRef,
+          payloadHash: hash,
           sentAt: new Date(),
-        })
-        .where(eq(deliveries.id, existing.id));
-    } else {
-      await db.insert(deliveries).values({
-        taskId: task.id,
-        calendarTargetId: target.id,
-        method: target.method,
-        status: 'sent',
-        externalRef: result.externalRef ?? null,
-        icalUid: uid,
-        sequence,
-        sentAt: new Date(),
-      });
+        });
+        result.created++;
+      }
+    } catch (err) {
+      result.errors.push({ targetId: target.id, taskId: task.id, error: String(err) });
     }
-    delivered++;
   }
-  return delivered;
 }
 
-/** Cancel all outstanding deliveries for a task (e.g. on unassign / decline). */
-export async function cancelTaskDeliveries(
+/** Sync all of a caretaker's targets (active + paused). */
+export async function syncMember(
   db: Db,
   registry: DeliveryProviderRegistry,
   kek: string | undefined,
-  taskId: string,
-): Promise<number> {
+  memberId: string,
+): Promise<SyncResult> {
+  const result = emptyResult();
+  const member = (
+    await db.select().from(familyMembers).where(eq(familyMembers.id, memberId)).limit(1)
+  )[0];
+  if (!member) return result;
+
+  const childNames = await familyMemberNames(db, member.familyId);
+  const targets = await db
+    .select()
+    .from(calendarTargets)
+    .where(eq(calendarTargets.memberId, memberId));
+  for (const target of targets) {
+    await syncTarget(db, registry, kek, target, childNames, result);
+  }
+  return result;
+}
+
+/** Periodic true-up: reconcile every target in a family. */
+export async function syncFamily(
+  db: Db,
+  registry: DeliveryProviderRegistry,
+  kek: string | undefined,
+  familyId: string,
+): Promise<SyncResult> {
+  const result = emptyResult();
+  const childNames = await familyMemberNames(db, familyId);
+  const rows = await db
+    .select({ target: calendarTargets })
+    .from(calendarTargets)
+    .innerJoin(familyMembers, eq(familyMembers.id, calendarTargets.memberId))
+    .where(eq(familyMembers.familyId, familyId));
+  for (const { target } of rows) {
+    await syncTarget(db, registry, kek, target, childNames, result);
+  }
+  return result;
+}
+
+/** Remove all remote events for a target (before deleting it). */
+export async function purgeTargetRemote(
+  db: Db,
+  registry: DeliveryProviderRegistry,
+  kek: string | undefined,
+  target: TargetRow,
+): Promise<void> {
+  if (!registry.has(target.method)) return;
+  const credential = await resolveCredential(db, kek, target.credentialsRef);
+  const deliveryTarget: DeliveryTarget = {
+    method: target.method,
+    addressOrUrl: target.addressOrUrl,
+    externalCalendarId: target.externalCalendarId ?? undefined,
+    credential,
+  };
+  const provider = registry.get(target.method);
   const rows = await db
     .select()
     .from(deliveries)
-    .where(and(eq(deliveries.taskId, taskId), ne(deliveries.status, 'cancelled')));
-
-  let cancelled = 0;
+    .where(
+      and(eq(deliveries.calendarTargetId, target.id), ne(deliveries.status, 'cancelled')),
+    );
   for (const d of rows) {
-    const target = (
-      await db
-        .select()
-        .from(calendarTargets)
-        .where(eq(calendarTargets.id, d.calendarTargetId))
-        .limit(1)
-    )[0];
-    if (target && registry.has(target.method)) {
-      const credential = await resolveCredential(db, kek, target.credentialsRef);
-      try {
-        await registry.get(target.method).cancel(
-          {
-            uid: d.icalUid ?? `igt-${taskId}-${target.id}`,
-            sequence: d.sequence + 1,
-            start: new Date(),
-            end: null,
-            summary: 'Cancelled',
-          },
-          {
-            method: target.method,
-            addressOrUrl: target.addressOrUrl,
-            externalCalendarId: target.externalCalendarId ?? undefined,
-            credential,
-          },
-        );
-      } catch (err) {
-        console.error(`cancel delivery failed for ${d.id}`, err);
-      }
+    try {
+      await provider.cancel(
+        {
+          uid: d.icalUid ?? `igt-${d.taskId}-${target.id}`,
+          sequence: d.sequence + 1,
+          start: new Date(),
+          end: null,
+          summary: 'Cancelled',
+        },
+        deliveryTarget,
+      );
+    } catch {
+      // best-effort; rows are removed by the target's cascade delete
     }
-    await db.update(deliveries).set({ status: 'cancelled' }).where(eq(deliveries.id, d.id));
-    cancelled++;
   }
-  return cancelled;
 }
 
 /**
  * Production provider registry. CalDAV + Google are always available; email is
- * **opt-in** and only wired when the Cloudflare Email Service `send_email`
- * binding (env.EMAIL) is present — it requires a paid plan. While disconnected,
- * email calendar targets are simply skipped by deliverTask (no errors). To
- * enable later: declare the binding in wrangler.jsonc + verify a sending domain
- * (see README / infra/terraform).
+ * opt-in on the Cloudflare Email Service `send_email` binding (a paid feature).
+ * When unavailable, email targets are skipped by the reconciler.
  */
 export function getProductionRegistry(env: Bindings): DeliveryProviderRegistry {
   const registry = new DeliveryProviderRegistry()
