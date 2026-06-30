@@ -5,6 +5,7 @@ import type { HonoEnv } from './env.js';
 import { authMiddleware } from './middleware/auth.js';
 import { authRoutes } from './routes/auth.js';
 import { familyRoutes } from './routes/families.js';
+import { inviteRoutes } from './routes/invites.js';
 import { scheduled } from './scheduled.js';
 
 /**
@@ -36,6 +37,9 @@ app.get('/health/db', async (c) => {
 // --- Auth + identity -----------------------------------------------------
 
 app.route('/auth', authRoutes);
+
+// Member-claim invites (accept links a logged-in user to a pre-created member).
+app.route('/invites', inviteRoutes);
 
 /** Current user + the families they belong to (with their member record). */
 app.get('/me', authMiddleware, async (c) => {

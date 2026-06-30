@@ -200,3 +200,80 @@ describe('member editing & permissions', () => {
     expect(((await adminEdit.json()) as { member: { isCaretaker: boolean } }).member.isCaretaker).toBe(false);
   });
 });
+
+describe('member-claim invites', () => {
+  it('links an accepting user to a pre-created member (idempotent, single-claim)', async () => {
+    const alice = await login('inv-alice@example.com');
+    const famRes = await call('/families', authed(alice.token, { name: 'Invite Fam' }));
+    const familyId = ((await famRes.json()) as { family: { id: string } }).family.id;
+
+    // Admin pre-creates a caretaker with no login.
+    const memberRes = await call(
+      `/families/${familyId}/members`,
+      authed(alice.token, { relationName: 'Grandma', isCaretaker: true }),
+    );
+    const grandmaId = ((await memberRes.json()) as { member: { id: string } }).member.id;
+
+    // Issue the share token.
+    const issued = await call(
+      `/families/${familyId}/members/${grandmaId}/invite`,
+      authed(alice.token),
+    );
+    expect(issued.status).toBe(201);
+    const { token } = (await issued.json()) as { token: string };
+    expect(token).toBeTruthy();
+
+    // Public preview shows what you're joining.
+    const preview = await call(`/invites/${token}`);
+    expect(preview.status).toBe(200);
+    expect((await preview.json()) as unknown).toMatchObject({
+      invite: { familyName: 'Invite Fam', relationName: 'Grandma', status: 'pending' },
+    });
+
+    // Bob (a different, already-registered user) accepts → linked to Grandma.
+    const bob = await login('inv-bob@example.com');
+    const accept = await call(`/invites/${token}/accept`, authed(bob.token));
+    expect(accept.status).toBe(200);
+    expect((await accept.json()) as unknown).toMatchObject({ ok: true, familyId, memberId: grandmaId });
+
+    // Bob's /me now includes the family as Grandma.
+    const bobMe = await call('/me', { headers: { Authorization: `Bearer ${bob.token}` } });
+    const fams = ((await bobMe.json()) as {
+      families: { family: { id: string }; member: { id: string } }[];
+    }).families;
+    expect(fams.find((f) => f.family.id === familyId)?.member.id).toBe(grandmaId);
+
+    // Re-accepting by Bob is idempotent.
+    const reaccept = await call(`/invites/${token}/accept`, authed(bob.token));
+    expect(reaccept.status).toBe(200);
+
+    // A third user cannot claim an already-claimed member.
+    const carol = await login('inv-carol@example.com');
+    const taken = await call(`/invites/${token}/accept`, authed(carol.token));
+    expect(taken.status).toBe(409);
+  });
+
+  it('only admins can issue invites; preview 404s for bad tokens', async () => {
+    const alice = await login('inv-admin2@example.com');
+    const famRes = await call('/families', authed(alice.token, { name: 'Fam2' }));
+    const familyId = ((await famRes.json()) as { family: { id: string } }).family.id;
+    const memberRes = await call(
+      `/families/${familyId}/members`,
+      authed(alice.token, { relationName: 'Helper', isCaretaker: true }),
+    );
+    const helperId = ((await memberRes.json()) as { member: { id: string } }).member.id;
+
+    // Bob claims Helper (a non-admin member), then cannot issue invites himself.
+    const issued = await call(`/families/${familyId}/members/${helperId}/invite`, authed(alice.token));
+    const { token } = (await issued.json()) as { token: string };
+    const bob = await login('inv-bob2@example.com');
+    await call(`/invites/${token}/accept`, authed(bob.token));
+    const bobIssue = await call(
+      `/families/${familyId}/members/${helperId}/invite`,
+      authed(bob.token),
+    );
+    expect(bobIssue.status).toBe(403);
+
+    expect((await call('/invites/does-not-exist')).status).toBe(404);
+  });
+});

@@ -66,7 +66,8 @@ export type RsvpStatus = z.infer<typeof RsvpStatus>;
 export const IdentityProvider = z.enum(['apple', 'magic_link']);
 export type IdentityProvider = z.infer<typeof IdentityProvider>;
 
-export const InviteType = z.enum(['new_family', 'join_family']);
+/** `claim_member` links an accepting user to a pre-created family member. */
+export const InviteType = z.enum(['new_family', 'join_family', 'claim_member']);
 export type InviteType = z.infer<typeof InviteType>;
 
 export const InviteStatus = z.enum([

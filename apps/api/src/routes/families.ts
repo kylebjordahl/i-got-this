@@ -12,6 +12,7 @@ import {
   requireFamilyMember,
 } from '../middleware/auth.js';
 import { deferSync, getProductionRegistry, syncFamily } from '../services/delivery.js';
+import { createMemberClaimInvite } from '../services/invites.js';
 import { feedRoutes } from './feeds.js';
 import { targetRoutes } from './targets.js';
 import { taskRoutes } from './tasks.js';
@@ -101,6 +102,36 @@ familyRoutes.post(
     )[0]!;
 
     return c.json({ member }, 201);
+  },
+);
+
+/**
+ * Issue a member-claim invite (admin) — a share token that links whoever
+ * accepts it (after logging in) to this pre-created member. Returns the token;
+ * the client composes a shareable link/code. Works for users who already have
+ * an account (no new user is created on accept).
+ */
+familyRoutes.post(
+  '/:familyId/members/:memberId/invite',
+  requireFamilyMember,
+  requireAdmin,
+  async (c) => {
+    const db = getDb(c.env.DB);
+    const me = c.get('member');
+    const memberId = c.req.param('memberId');
+
+    const member = (
+      await db
+        .select()
+        .from(familyMembers)
+        .where(and(eq(familyMembers.id, memberId), eq(familyMembers.familyId, me.familyId)))
+        .limit(1)
+    )[0];
+    if (!member) return c.json({ error: 'not_found' }, 404);
+    if (member.userId) return c.json({ error: 'already_linked' }, 409);
+
+    const invite = await createMemberClaimInvite(db, me.familyId, memberId, me.id);
+    return c.json({ token: invite.token, expiresAt: invite.expiresAt }, 201);
   },
 );
 

@@ -10,6 +10,7 @@ class Member {
     required this.isCaretaker,
     required this.isAdmin,
     required this.requiresCaretaker,
+    this.userId,
   });
 
   final String id;
@@ -18,12 +19,18 @@ class Member {
   final bool isAdmin;
   final bool requiresCaretaker;
 
+  /// The linked login account, if any. Null ⇒ can be invited to claim this slot.
+  final String? userId;
+
+  bool get hasLogin => userId != null;
+
   factory Member.fromJson(Map<String, dynamic> j) => Member(
         id: j['id'] as String,
         relationName: j['relationName'] as String,
         isCaretaker: j['isCaretaker'] as bool? ?? false,
         isAdmin: j['isAdmin'] as bool? ?? false,
         requiresCaretaker: j['requiresCaretaker'] as bool? ?? false,
+        userId: j['userId'] as String?,
       );
 }
 

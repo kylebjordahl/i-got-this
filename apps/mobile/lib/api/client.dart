@@ -85,6 +85,21 @@ class ApiClient {
     );
   }
 
+  /// Issue a member-claim invite (admin). Returns `{ token, expiresAt }`.
+  Future<Map<String, dynamic>> issueMemberInvite(String familyId, String memberId) async =>
+      _obj(await _dio.post('/families/$familyId/members/$memberId/invite',
+          data: <String, dynamic>{}, options: _auth));
+
+  /// Public preview of an invite token: `{ familyName, relationName, status }`.
+  Future<Map<String, dynamic>> previewInvite(String token) async {
+    final res = await _dio.get('/invites/$token');
+    return (res.data as Map<String, dynamic>)['invite'] as Map<String, dynamic>;
+  }
+
+  /// Accept an invite (must be logged in) — links the current user to the member.
+  Future<Map<String, dynamic>> acceptInvite(String token) async =>
+      _obj(await _dio.post('/invites/$token/accept', data: <String, dynamic>{}, options: _auth));
+
   // --- Feeds -------------------------------------------------------------
 
   Future<List<dynamic>> listFeeds(String familyId) async =>

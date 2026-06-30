@@ -389,6 +389,11 @@ export const invites = sqliteTable(
       () => familyMembers.id,
       { onDelete: 'set null' },
     ),
+    // For `claim_member` invites: the pre-created member the accepting user is
+    // linked to (sets family_members.user_id). Null for family-level invites.
+    memberId: text('member_id').references(() => familyMembers.id, {
+      onDelete: 'cascade',
+    }),
     email: text('email'),
     token: text('token').notNull().unique(),
     grantIsCaretaker: integer('grant_is_caretaker', { mode: 'boolean' })

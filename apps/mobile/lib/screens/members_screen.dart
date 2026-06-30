@@ -15,7 +15,16 @@ class MembersScreen extends ConsumerWidget {
     final me = ref.watch(currentMemberProvider).valueOrNull;
 
     return Scaffold(
-      appBar: AppBar(title: const Text('Family')),
+      appBar: AppBar(
+        title: const Text('Family'),
+        actions: [
+          IconButton(
+            tooltip: 'Redeem invite code',
+            icon: const Icon(Icons.vpn_key_outlined),
+            onPressed: () => _redeem(context, ref),
+          ),
+        ],
+      ),
       floatingActionButton: (me?.isAdmin ?? false)
           ? FloatingActionButton.extended(
               heroTag: 'fab-members',
@@ -40,16 +49,30 @@ class MembersScreen extends ConsumerWidget {
                   for (final m in members)
                     Builder(
                       builder: (context) {
-                        final canEdit = (me?.isAdmin ?? false) || m.id == me?.id;
+                        final isAdmin = me?.isAdmin ?? false;
+                        final canEdit = isAdmin || m.id == me?.id;
+                        // Admins can invite a login for a caretaker slot that has none.
+                        final canInvite = isAdmin && !m.hasLogin && !m.requiresCaretaker;
                         return ListTile(
                           leading: CircleAvatar(
                             child: Icon(m.requiresCaretaker ? Icons.child_care : Icons.person),
                           ),
                           title: Text(m.relationName),
-                          subtitle: Text(_roles(m)),
-                          trailing: canEdit ? const Icon(Icons.edit, size: 20) : null,
+                          subtitle: Text(_roles(m) + (m.hasLogin ? ' · linked' : '')),
+                          trailing: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              if (canInvite)
+                                IconButton(
+                                  tooltip: 'Invite to log in',
+                                  icon: const Icon(Icons.ios_share, size: 20),
+                                  onPressed: () => _invite(context, ref, m),
+                                ),
+                              if (canEdit) const Icon(Icons.edit, size: 20),
+                            ],
+                          ),
                           onTap: canEdit
-                              ? () => _edit(context, ref, m, me?.isAdmin ?? false)
+                              ? () => _edit(context, ref, m, isAdmin)
                               : null,
                         );
                       },
@@ -58,6 +81,50 @@ class MembersScreen extends ConsumerWidget {
               ),
       ),
     );
+  }
+
+  Future<void> _invite(BuildContext context, WidgetRef ref, Member member) async {
+    try {
+      final familyId = await ref.read(familyProvider.future);
+      final res = await ref.read(apiClientProvider).issueMemberInvite(familyId, member.id);
+      final token = res['token'] as String;
+      if (!context.mounted) return;
+      await showDialog<void>(
+        context: context,
+        builder: (_) => AlertDialog(
+          title: Text('Invite ${member.relationName}'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text('Share this code. They sign in, then tap the key icon '
+                  'and paste it to claim this caretaker slot.'),
+              const SizedBox(height: 12),
+              SelectableText(token, style: const TextStyle(fontFamily: 'monospace')),
+            ],
+          ),
+          actions: [
+            TextButton(onPressed: () => Navigator.of(context).pop(), child: const Text('Done')),
+          ],
+        ),
+      );
+    } catch (e) {
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Invite failed: $e')));
+      }
+    }
+  }
+
+  Future<void> _redeem(BuildContext context, WidgetRef ref) async {
+    final redeemed = await showDialog<bool>(
+      context: context,
+      builder: (_) => const _RedeemInviteDialog(),
+    );
+    if (redeemed == true) {
+      ref.invalidate(familyProvider);
+      ref.invalidate(membersProvider);
+      ref.invalidate(currentMemberProvider);
+    }
   }
 
   Future<void> _edit(BuildContext context, WidgetRef ref, Member member, bool isAdmin) async {
@@ -281,6 +348,104 @@ class _EditMemberDialogState extends ConsumerState<_EditMemberDialog> {
           child: _busy
               ? const SizedBox(height: 18, width: 18, child: CircularProgressIndicator(strokeWidth: 2))
               : const Text('Save'),
+        ),
+      ],
+    );
+  }
+}
+
+/// Paste an invite code to link your account to a caretaker slot in a family.
+class _RedeemInviteDialog extends ConsumerStatefulWidget {
+  const _RedeemInviteDialog();
+
+  @override
+  ConsumerState<_RedeemInviteDialog> createState() => _RedeemInviteDialogState();
+}
+
+class _RedeemInviteDialogState extends ConsumerState<_RedeemInviteDialog> {
+  final _code = TextEditingController();
+  bool _busy = false;
+  String? _error;
+  String? _preview;
+
+  @override
+  void dispose() {
+    _code.dispose();
+    super.dispose();
+  }
+
+  Future<void> _check() async {
+    setState(() {
+      _error = null;
+      _preview = null;
+    });
+    try {
+      final p = await ref.read(apiClientProvider).previewInvite(_code.text.trim());
+      setState(() => _preview =
+          'Join "${p['familyName']}" as ${p['relationName'] ?? 'a caretaker'} (${p['status']})');
+    } catch (e) {
+      setState(() => _error = 'Code not found');
+    }
+  }
+
+  Future<void> _accept() async {
+    if (_code.text.trim().isEmpty) {
+      setState(() => _error = 'Paste a code');
+      return;
+    }
+    setState(() {
+      _busy = true;
+      _error = null;
+    });
+    try {
+      await ref.read(apiClientProvider).acceptInvite(_code.text.trim());
+      if (mounted) Navigator.of(context).pop(true);
+    } catch (e) {
+      setState(() => _error = '$e');
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: const Text('Redeem invite code'),
+      content: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          TextField(
+            controller: _code,
+            autofocus: true,
+            decoration: InputDecoration(
+              labelText: 'Invite code',
+              suffixIcon: IconButton(icon: const Icon(Icons.search), onPressed: _check),
+            ),
+            onSubmitted: (_) => _check(),
+          ),
+          if (_preview != null)
+            Padding(
+              padding: const EdgeInsets.only(top: 8),
+              child: Text(_preview!, style: Theme.of(context).textTheme.bodySmall),
+            ),
+          if (_error != null)
+            Padding(
+              padding: const EdgeInsets.only(top: 8),
+              child: Text(_error!, style: TextStyle(color: Theme.of(context).colorScheme.error)),
+            ),
+        ],
+      ),
+      actions: [
+        TextButton(
+          onPressed: _busy ? null : () => Navigator.of(context).pop(false),
+          child: const Text('Cancel'),
+        ),
+        FilledButton(
+          onPressed: _busy ? null : _accept,
+          child: _busy
+              ? const SizedBox(height: 18, width: 18, child: CircularProgressIndicator(strokeWidth: 2))
+              : const Text('Join'),
         ),
       ],
     );
