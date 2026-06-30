@@ -1,0 +1,25 @@
+name: Deploy production
+
+# Deploys to PRODUCTION when a GitHub Release is published. Tag the release off
+# main after staging looks good. Add required reviewers to the `production`
+# GitHub Environment to gate this behind a manual approval.
+on:
+  release:
+    types: [published]
+
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+jobs:
+  production:
+    uses: ./.github/workflows/deploy.yml
+    with:
+      environment: production
+      wrangler_env: production
+      d1_database: igt-prod
+      tfvars: production.tfvars
+      tf_backend: backend.production.hcl
+    secrets:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
