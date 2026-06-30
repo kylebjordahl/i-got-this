@@ -1,7 +1,7 @@
 import { eq, families, familyMembers, getDb } from '@igt/db';
 import { Hono } from 'hono';
 import { cors } from 'hono/cors';
-import type { HonoEnv } from './env.js';
+import type { Bindings, HonoEnv } from './env.js';
 import { authMiddleware } from './middleware/auth.js';
 import { deliveryQueueConsumer } from './services/delivery.js';
 import { authRoutes } from './routes/auth.js';
@@ -63,4 +63,47 @@ app.route('/families', familyRoutes);
 
 app.notFound((c) => c.json({ error: 'not_found' }, 404));
 
-export default { fetch: app.fetch, scheduled, queue: deliveryQueueConsumer };
+/**
+ * Serve the Flutter web client from the static-assets binding, falling back to
+ * the app shell for client-side (deep-link) routes.
+ */
+async function serveWebApp(request: Request, assets: Fetcher): Promise<Response> {
+  const res = await assets.fetch(request);
+  if (res.status !== 404) return res;
+  const url = new URL(request.url);
+  url.pathname = '/app/index.html';
+  return assets.fetch(new Request(url.toString(), request));
+}
+
+/**
+ * Single-origin layout for deployed envs (when the ASSETS binding is present):
+ *   /api/*  → the API (the prefix is stripped; routes live at the root)
+ *   /app/*  → the Flutter web client (static assets, SPA fallback)
+ *   /       → redirect to /app/
+ * Without ASSETS (local dev / tests) the API is served directly at the root, so
+ * the existing test paths and `wrangler dev` are unchanged.
+ */
+const handler = {
+  async fetch(request: Request, env: Bindings, ctx: ExecutionContext): Promise<Response> {
+    if (!env.ASSETS) return app.fetch(request, env, ctx);
+
+    const url = new URL(request.url);
+    const path = url.pathname;
+
+    if (path === '/api' || path.startsWith('/api/')) {
+      url.pathname = path.slice('/api'.length) || '/';
+      return app.fetch(new Request(url.toString(), request), env, ctx);
+    }
+    if (path.startsWith('/app/')) {
+      return serveWebApp(request, env.ASSETS);
+    }
+    // Bare domain, `/app` (no trailing slash), and anything else → the web app.
+    url.pathname = '/app/';
+    url.search = '';
+    return Response.redirect(url.toString(), 302);
+  },
+  scheduled,
+  queue: deliveryQueueConsumer,
+};
+
+export default handler;

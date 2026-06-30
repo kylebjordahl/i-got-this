@@ -61,6 +61,24 @@ jobs:
       - run: corepack enable && corepack prepare pnpm@9 --activate
       - run: pnpm install --frozen-lockfile
 
+      # Build the Flutter web client and stage it under apps/api/public/app so
+      # the Worker serves it (same origin) at /app. API base is the relative
+      # /api on that origin.
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+      - name: Build web client
+        working-directory: apps/mobile
+        run: |
+          flutter create . --platforms=web --project-name caretaker_app
+          flutter pub get
+          flutter build web --base-href /app/ --dart-define=API_BASE_URL=/api
+      - name: Stage web assets
+        run: |
+          rm -rf apps/api/public/app
+          mkdir -p apps/api/public
+          cp -r apps/mobile/build/web apps/api/public/app
+
       - uses: hashicorp/setup-terraform@v3
       - name: Terraform apply (${{ inputs.environment }} infra)
         working-directory: infra/terraform

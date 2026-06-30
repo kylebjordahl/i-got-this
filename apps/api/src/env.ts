@@ -18,6 +18,11 @@ export interface Bindings {
      */
     DELIVERY_QUEUE?: Queue<DeliveryJob>;
     /**
+     * Static-assets binding serving the Flutter web client under /app. Present
+     * only in deployed envs that host the web client on the same origin.
+     */
+    ASSETS?: Fetcher;
+    /**
      * Comma-separated allowed Apple `aud` values for Sign in with Apple — your
      * iOS bundle id and/or web Services ID. Unset ⇒ Apple login disabled.
      */

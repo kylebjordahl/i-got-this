@@ -118,25 +118,39 @@ echo "<another>"    | pnpm wrangler secret put KEK --env production
 A `wrangler secret` takes precedence over the `vars` KEK at runtime. Use a
 **different** KEK per environment.
 
-### 7. Custom domain (optional but recommended)
+### 7. Single-subdomain layout (one Worker serves API + web + redirect)
 
-By default the Worker is reachable at
-`https://igt-api-<env>.<your-subdomain>.workers.dev`. To use your own domain
-(e.g. `api.staging.example.com`):
+Staging is configured to host everything on **one** subdomain
+(`staging.igt.kylebjordahl.com`), served by the API Worker:
 
-1. Add the zone to Cloudflare (or use an existing one).
-2. Add a route to `apps/api/wrangler.jsonc` under the env, e.g.:
-   ```jsonc
-   "env": {
-     "staging": {
-       "routes": [{ "pattern": "api.staging.example.com", "custom_domain": true }],
-       ...
-     }
-   }
-   ```
-3. Ensure the API token has **Zone · DNS · Edit** + **Workers Routes · Edit** for
-   that zone. Wrangler provisions the DNS + cert on deploy.
-4. Point the mobile/web client's API base URL at the new host.
+| Path | Serves |
+| --- | --- |
+| `/api/*` | the API (the Worker strips the `/api` prefix) |
+| `/app/*` | the Flutter **web client** (static assets, with SPA deep-link fallback) |
+| `/` (and anything else) | redirect → `/app/` |
+
+This is wired in `apps/api/wrangler.jsonc` under `env.staging`:
+- a **custom-domain route** (`staging.igt.kylebjordahl.com`), and
+- an **`assets`** binding (`directory: ./public`, `binding: ASSETS`). CI runs
+  `flutter build web --base-href /app/ --dart-define=API_BASE_URL=/api` and
+  stages it into `apps/api/public/app/` before `wrangler deploy`, so the web
+  client calls the API on the **same origin** at `/api`.
+
+The routing is gated on the `ASSETS` binding, so local `wrangler dev` and the
+tests (no binding) still serve the API directly at the root.
+
+**Prerequisites:**
+1. The parent zone (`kylebjordahl.com`, or a delegated `igt.kylebjordahl.com`)
+   must be on **Cloudflare** — `custom_domain: true` provisions the
+   `staging.igt.kylebjordahl.com` DNS record + TLS cert automatically.
+2. The API token needs **Zone · DNS · Edit** + **Zone · Workers Routes · Edit**
+   on that zone (in addition to the account scopes in §1).
+3. **Native (iOS) clients** aren't same-origin — build them with
+   `--dart-define=API_BASE_URL=https://staging.igt.kylebjordahl.com/api`.
+
+> To put **production** on its own subdomain later, mirror the `routes` +
+> `assets` blocks under `env.production` (e.g. `igt.kylebjordahl.com`). Until
+> then prod has no `ASSETS` binding and serves the API at the root.
 
 ---
 
@@ -157,8 +171,10 @@ By default the Worker is reachable at
 ## Verifying a deploy
 
 ```bash
-curl https://<your-api-host>/health        # → ok
-cd apps/api && pnpm wrangler tail --env staging   # live logs
+curl https://staging.igt.kylebjordahl.com/api/health   # → { ok: true, ... }
+curl -sI https://staging.igt.kylebjordahl.com/         # → 302 to /app/
+open https://staging.igt.kylebjordahl.com/app/         # the web client
+cd apps/api && pnpm wrangler tail --env staging        # live logs
 ```
 
 ## Notes / gotchas
@@ -170,5 +186,6 @@ cd apps/api && pnpm wrangler tail --env staging   # live logs
   paid plan + verified sending domain are set up, magic-link login can't email in
   a deployed env — use **Sign in with Apple** or the **invite link** flow for
   onboarding. See `infra/terraform/main.tf` for the sending-domain DNS notes.
-- The **web client** (Flutter web) is not wired into CD yet; deploy it to
-  Cloudflare Pages as a follow-up (`flutter build web` → Pages project).
+- The **web client** is built in CI and served by the same Worker under `/app`
+  (see §7) — no separate Pages project. Production gets it once you add the
+  `routes` + `assets` blocks under `env.production`.

@@ -44,7 +44,27 @@
   // "send_email": [{ "name": "EMAIL", "remote": true }],
   "env": {
     "staging": {
-      "vars": { "ENVIRONMENT": "staging" },
+      // Named-env vars do NOT inherit from the top level — list them here.
+      // KEK is set per-env via `wrangler secret put KEK --env staging`.
+      "vars": {
+        "ENVIRONMENT": "staging",
+        "ORGANIZER_EMAIL": "noreply@igt.local",
+        "APPLE_CLIENT_IDS": "",
+        "GOOGLE_OAUTH_CLIENT_ID": ""
+      },
+      // The whole subdomain routes to this Worker (custom_domain provisions DNS
+      // + cert; the parent zone must be on Cloudflare). The Worker serves the
+      // API at /api, the web client at /app, and redirects / → /app.
+      "routes": [
+        { "pattern": "staging.igt.kylebjordahl.com", "custom_domain": true }
+      ],
+      // Flutter web build (CI runs `flutter build web --base-href /app/` into
+      // ./public/app). The Worker serves it via the ASSETS binding under /app.
+      "assets": {
+        "directory": "./public",
+        "binding": "ASSETS",
+        "not_found_handling": "none"
+      },
       "d1_databases": [
         {
           "binding": "DB",
@@ -69,7 +89,13 @@
       // "send_email": [{ "name": "EMAIL" }]  // enable with a paid plan
     },
     "production": {
-      "vars": { "ENVIRONMENT": "production" },
+      // KEK is set per-env via `wrangler secret put KEK --env production`.
+      "vars": {
+        "ENVIRONMENT": "production",
+        "ORGANIZER_EMAIL": "noreply@igt.local",
+        "APPLE_CLIENT_IDS": "",
+        "GOOGLE_OAUTH_CLIENT_ID": ""
+      },
       "d1_databases": [
         {
           "binding": "DB",

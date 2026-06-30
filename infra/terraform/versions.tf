@@ -12,16 +12,16 @@ terraform {
   # account-specific endpoint and create the bucket out-of-band first, then:
   #   terraform init -backend-config=backend.<env>.hcl
   #
-  # backend "s3" {
-  #   bucket                      = "igt-tfstate"
-  #   key                         = "envs/staging/terraform.tfstate"
-  #   region                      = "auto"
-  #   endpoints                   = { s3 = "https://<ACCOUNT_ID>.r2.cloudflarestorage.com" }
-  #   skip_credentials_validation = true
-  #   skip_region_validation      = true
-  #   skip_requesting_account_id  = true
-  #   skip_metadata_api_check     = true
-  #   skip_s3_checksum            = true
-  #   use_path_style              = true
-  # }
+  backend "s3" {
+    bucket                      = "igt-tfstate"
+    key                         = "envs/staging/terraform.tfstate"
+    region                      = "auto"
+    endpoints                   = { s3 = "https://ee82a10221cef0d9c09ed23e065bcc21.r2.cloudflarestorage.com" }
+    skip_credentials_validation = true
+    skip_region_validation      = true
+    skip_requesting_account_id  = true
+    skip_metadata_api_check     = true
+    skip_s3_checksum            = true
+    use_path_style              = true
+  }
 }

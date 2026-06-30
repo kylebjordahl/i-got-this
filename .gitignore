@@ -42,3 +42,5 @@ apps/mobile/lib/api/generated/
 
 # FVM Version Cache
 .fvm/
+# Worker static assets (Flutter web build, assembled in CI)
+apps/api/public/
