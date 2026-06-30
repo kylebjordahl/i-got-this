@@ -2,10 +2,11 @@ name: Deploy (reusable)
 
 # Reusable deployment: provision durable infra (Terraform), apply D1 migrations,
 # and deploy the Worker (Wrangler) for a given environment. Called by
-# deploy-staging.yml (push → main) and deploy-production.yml (release published).
+# deploy-staging.yml (after CI passes on main) and deploy-production.yml
+# (release published).
 #
-# The only input is `environment` (staging | production); every other value
-# (wrangler env key, D1 name, tfvars, TF backend) is derived from it.
+# `environment` (staging | production) drives every derived value (wrangler env
+# key, D1 name, TF backend). `ref` optionally pins the commit to deploy.
 
 on:
   workflow_call:
@@ -14,6 +15,14 @@ on:
         description: Target environment — "staging" or "production"
         required: true
         type: string
+      ref:
+        description: >-
+          Git ref/SHA to check out and deploy. Defaults to the standard
+          checkout ref. Staging passes the exact commit that passed CI so a
+          later push to main can't sneak an unvalidated commit into deploy.
+        required: false
+        type: string
+        default: ""
     secrets:
       CLOUDFLARE_API_TOKEN:
         required: true
@@ -25,21 +34,8 @@ on:
         required: true
 
 jobs:
-  test:
-    name: Backend gate (typecheck + tests)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version-file: .nvmrc
-      - run: corepack enable && corepack prepare pnpm@9 --activate
-      - run: pnpm install --frozen-lockfile
-      - run: pnpm nx run-many -t typecheck test --projects=tag:language:typescript
-
   deploy:
     name: Deploy → ${{ inputs.environment }}
-    needs: test
     runs-on: ubuntu-latest
     # Binds to the GitHub Environment — add required reviewers there to gate
     # production behind a manual approval.
@@ -58,6 +54,8 @@ jobs:
           fi
 
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
       - uses: actions/setup-node@v4
         with:
           node-version-file: .nvmrc
