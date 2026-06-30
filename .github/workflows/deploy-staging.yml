@@ -1,8 +1,11 @@
 name: Deploy staging
 
-# Continuous deployment to STAGING on every push to main.
+# Continuous deployment to STAGING after CI passes on main. Gated on the CI
+# workflow rather than firing on the raw push, so a red main never deploys.
 on:
-  push:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
     branches: [main]
 
 concurrency:
@@ -11,9 +14,13 @@ concurrency:
 
 jobs:
   staging:
+    # Only deploy when the triggering CI run actually succeeded.
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
     uses: ./.github/workflows/deploy.yml
     with:
       environment: staging
+      # Deploy the exact commit CI validated, not whatever main's HEAD is now.
+      ref: ${{ github.event.workflow_run.head_sha }}
     secrets:
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
       CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
