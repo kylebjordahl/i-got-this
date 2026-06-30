@@ -117,7 +117,8 @@ _Provider _providerOf(Map<String, dynamic> target) {
   return target['providerHint'] == 'icloud' ? _Provider.icloud : _Provider.genericCaldav;
 }
 
-/// Connect a new calendar, or edit an existing one (`existing` set).
+/// Connect a new calendar (a 3-step wizard: type → credentials → configure) or
+/// edit an existing one (`existing` set → configuration options only).
 class ConnectCalendarPage extends ConsumerStatefulWidget {
   const ConnectCalendarPage({super.key, this.existing});
 
@@ -131,6 +132,7 @@ class _ConnectCalendarPageState extends ConsumerState<ConnectCalendarPage> {
   _Provider _provider = _Provider.email;
   String? _memberId;
   bool _active = true;
+  int _step = 0; // wizard step (new connection only)
   final _name = TextEditingController();
   final _address = TextEditingController(); // email, or CalDAV server URL
   final _username = TextEditingController();
@@ -145,6 +147,8 @@ class _ConnectCalendarPageState extends ConsumerState<ConnectCalendarPage> {
   List<Map<String, dynamic>> _discovered = const [];
   String? _selectedCalendarUrl;
   bool _discovering = false;
+  // On edit, reveal the credential + re-fetch fields to switch the calendar.
+  bool _changingCalendar = false;
 
   bool _busy = false;
   String? _error;
@@ -247,6 +251,42 @@ class _ConnectCalendarPageState extends ConsumerState<ConnectCalendarPage> {
     }
   }
 
+  /// Validate the active wizard step; returns an error message or null.
+  String? _validateStep(int step) {
+    if (step == 0) return _memberId == null ? 'Pick a caretaker' : null;
+    if (step == 1) {
+      switch (_provider) {
+        case _Provider.email:
+          return _address.text.trim().contains('@') ? null : 'Enter a delivery email';
+        case _Provider.icloud:
+        case _Provider.genericCaldav:
+          if (_address.text.trim().isEmpty ||
+              _username.text.trim().isEmpty ||
+              _password.text.isEmpty) {
+            return 'Enter the server URL, username, and password';
+          }
+          return _discovered.isEmpty ? 'Tap "Fetch calendars" to continue' : null;
+        case _Provider.google:
+          return _accessToken.text.trim().isEmpty ? 'Paste an access token' : null;
+      }
+    }
+    return null; // step 2 validated in _save
+  }
+
+  void _onContinue() {
+    final err = _validateStep(_step);
+    if (err != null) {
+      setState(() => _error = err);
+      return;
+    }
+    setState(() => _error = null);
+    if (_step < 2) {
+      setState(() => _step++);
+    } else {
+      _save();
+    }
+  }
+
   Future<void> _save() async {
     if (_memberId == null) return setState(() => _error = 'Pick a caretaker');
     if (_name.text.trim().isEmpty) return setState(() => _error = 'Give the connection a name');
@@ -345,98 +385,272 @@ class _ConnectCalendarPageState extends ConsumerState<ConnectCalendarPage> {
               ),
             );
           }
-          return ListView(
-            padding: const EdgeInsets.all(16),
-            children: [
-              DropdownButtonFormField<String>(
-                initialValue: _memberId,
-                decoration: const InputDecoration(labelText: 'Caretaker'),
-                items: [
-                  for (final c in people)
-                    DropdownMenuItem(value: c.id, child: Text(c.relationName)),
-                ],
-                // Caretaker + provider are fixed once created.
-                onChanged: _editing ? null : (v) => setState(() => _memberId = v),
-              ),
-              const SizedBox(height: 16),
-              DropdownButtonFormField<_Provider>(
-                initialValue: _provider,
-                decoration: const InputDecoration(labelText: 'Provider'),
-                items: const [
-                  DropdownMenuItem(value: _Provider.email, child: Text('Email invite')),
-                  DropdownMenuItem(value: _Provider.icloud, child: Text('iCloud (CalDAV)')),
-                  DropdownMenuItem(value: _Provider.genericCaldav, child: Text('Other CalDAV')),
-                  DropdownMenuItem(value: _Provider.google, child: Text('Google Calendar')),
-                ],
-                onChanged: _editing ? null : (p) => p == null ? null : _onProviderChanged(p),
-              ),
-              const SizedBox(height: 16),
-              TextField(
-                controller: _name,
-                decoration: const InputDecoration(
-                  labelText: 'Connection name',
-                  hintText: 'e.g. Work calendar',
-                ),
-              ),
-              if (_editing)
-                SwitchListTile(
-                  value: _active,
-                  onChanged: (v) => setState(() => _active = v),
-                  title: const Text('Active'),
-                  subtitle: const Text('Deliver tasks to this calendar'),
-                  contentPadding: EdgeInsets.zero,
-                ),
-              const SizedBox(height: 16),
-              Text('Default reminders', style: Theme.of(context).textTheme.labelLarge),
-              const _Hint('Minutes before each event to alert (up to two). Leave blank for none.'),
-              const SizedBox(height: 8),
-              Row(
-                children: [
-                  Expanded(
-                    child: TextField(
-                      controller: _alert1,
-                      keyboardType: TextInputType.number,
-                      decoration: const InputDecoration(
-                        labelText: 'Alert 1 (min)',
-                        hintText: 'e.g. 30',
-                      ),
-                    ),
-                  ),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child: TextField(
-                      controller: _alert2,
-                      keyboardType: TextInputType.number,
-                      decoration: const InputDecoration(
-                        labelText: 'Alert 2 (min)',
-                        hintText: 'e.g. 10',
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 8),
-              ..._providerFields(),
-              if (_error != null)
-                Padding(
-                  padding: const EdgeInsets.only(top: 16),
-                  child: Text(_error!, style: TextStyle(color: Theme.of(context).colorScheme.error)),
-                ),
-              const SizedBox(height: 24),
-              FilledButton(
-                onPressed: _busy ? null : _save,
-                child: _busy
-                    ? const SizedBox(height: 18, width: 18, child: CircularProgressIndicator(strokeWidth: 2))
-                    : Text(_editing ? 'Save' : 'Connect'),
-              ),
-            ],
-          );
+          return _editing ? _editConfigBody() : _wizardBody(people);
         },
       ),
     );
   }
 
-  List<Widget> _providerFields() {
+  // --- New connection: 3-step wizard ------------------------------------
+
+  Widget _wizardBody(List<dynamic> people) {
+    return Stepper(
+      currentStep: _step,
+      onStepContinue: _busy ? null : _onContinue,
+      onStepCancel: _busy
+          ? null
+          : () => _step == 0 ? Navigator.of(context).pop(false) : setState(() => _step--),
+      onStepTapped: (i) => i < _step ? setState(() => _step = i) : null,
+      controlsBuilder: (context, details) => Padding(
+        padding: const EdgeInsets.only(top: 12),
+        child: Row(
+          children: [
+            FilledButton(
+              onPressed: details.onStepContinue,
+              child: _busy && _step == 2
+                  ? const SizedBox(height: 18, width: 18, child: CircularProgressIndicator(strokeWidth: 2))
+                  : Text(_step == 2 ? 'Connect' : 'Next'),
+            ),
+            const SizedBox(width: 8),
+            TextButton(
+              onPressed: details.onStepCancel,
+              child: Text(_step == 0 ? 'Cancel' : 'Back'),
+            ),
+            if (_error != null)
+              Expanded(
+                child: Padding(
+                  padding: const EdgeInsets.only(left: 12),
+                  child: Text(_error!,
+                      style: TextStyle(color: Theme.of(context).colorScheme.error)),
+                ),
+              ),
+          ],
+        ),
+      ),
+      steps: [
+        Step(
+          title: const Text('Type'),
+          isActive: _step >= 0,
+          state: _step > 0 ? StepState.complete : StepState.indexed,
+          content: _typeStep(people),
+        ),
+        Step(
+          title: const Text('Credentials'),
+          isActive: _step >= 1,
+          state: _step > 1 ? StepState.complete : StepState.indexed,
+          content: _credentialsStep(),
+        ),
+        Step(
+          title: const Text('Configure'),
+          isActive: _step >= 2,
+          state: StepState.indexed,
+          content: _configStep(),
+        ),
+      ],
+    );
+  }
+
+  Widget _typeStep(List<dynamic> people) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        DropdownButtonFormField<String>(
+          initialValue: _memberId,
+          decoration: const InputDecoration(labelText: 'Caretaker'),
+          items: [
+            for (final c in people)
+              DropdownMenuItem(value: c.id as String, child: Text(c.relationName as String)),
+          ],
+          onChanged: (v) => setState(() => _memberId = v),
+        ),
+        const SizedBox(height: 16),
+        DropdownButtonFormField<_Provider>(
+          initialValue: _provider,
+          decoration: const InputDecoration(labelText: 'Provider'),
+          items: const [
+            DropdownMenuItem(value: _Provider.email, child: Text('Email invite')),
+            DropdownMenuItem(value: _Provider.icloud, child: Text('iCloud (CalDAV)')),
+            DropdownMenuItem(value: _Provider.genericCaldav, child: Text('Other CalDAV')),
+            DropdownMenuItem(value: _Provider.google, child: Text('Google Calendar')),
+          ],
+          onChanged: (p) => p == null ? null : _onProviderChanged(p),
+        ),
+      ],
+    );
+  }
+
+  Widget _credentialsStep() {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: _credentialFields(),
+    );
+  }
+
+  Widget _configStep() {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        if (_isCalDav) ...[
+          _calendarPicker(),
+          const SizedBox(height: 16),
+        ],
+        if (_provider == _Provider.google) ...[
+          _googleCalendarIdField(),
+          const SizedBox(height: 16),
+        ],
+        TextField(
+          controller: _name,
+          decoration: const InputDecoration(
+            labelText: 'Connection name',
+            hintText: 'e.g. Work calendar',
+          ),
+        ),
+        const SizedBox(height: 16),
+        ..._alertsSection(),
+      ],
+    );
+  }
+
+  // --- Edit: configuration options only ---------------------------------
+
+  Widget _editConfigBody() {
+    return ListView(
+      padding: const EdgeInsets.all(16),
+      children: [
+        const _Hint('Type, caretaker, and credentials are kept from setup. '
+            'Leave credential fields blank to keep the current ones.'),
+        const SizedBox(height: 12),
+        TextField(
+          controller: _name,
+          decoration: const InputDecoration(labelText: 'Connection name'),
+        ),
+        SwitchListTile(
+          value: _active,
+          onChanged: (v) => setState(() => _active = v),
+          title: const Text('Active'),
+          subtitle: const Text('Deliver tasks to this calendar'),
+          contentPadding: EdgeInsets.zero,
+        ),
+        const SizedBox(height: 8),
+        ..._configFieldsForEdit(),
+        const SizedBox(height: 16),
+        ..._alertsSection(),
+        if (_error != null)
+          Padding(
+            padding: const EdgeInsets.only(top: 16),
+            child: Text(_error!, style: TextStyle(color: Theme.of(context).colorScheme.error)),
+          ),
+        const SizedBox(height: 24),
+        FilledButton(
+          onPressed: _busy ? null : _save,
+          child: _busy
+              ? const SizedBox(height: 18, width: 18, child: CircularProgressIndicator(strokeWidth: 2))
+              : const Text('Save'),
+        ),
+      ],
+    );
+  }
+
+  List<Widget> _configFieldsForEdit() {
+    switch (_provider) {
+      case _Provider.email:
+        return [
+          TextField(
+            controller: _address,
+            keyboardType: TextInputType.emailAddress,
+            decoration: const InputDecoration(labelText: 'Delivery email'),
+          ),
+        ];
+      case _Provider.google:
+        return [
+          _googleCalendarIdField(),
+          const SizedBox(height: 12),
+          TextField(
+            controller: _accessToken,
+            decoration: const InputDecoration(
+              labelText: 'OAuth access token',
+              hintText: 'Leave blank to keep current',
+            ),
+          ),
+        ];
+      case _Provider.icloud:
+      case _Provider.genericCaldav:
+        return [
+          ListTile(
+            contentPadding: EdgeInsets.zero,
+            title: const Text('Calendar'),
+            subtitle: Text(_selectedCalendarUrl ?? 'None', maxLines: 2, overflow: TextOverflow.ellipsis),
+            trailing: TextButton(
+              onPressed: () => setState(() => _changingCalendar = !_changingCalendar),
+              child: Text(_changingCalendar ? 'Cancel' : 'Change'),
+            ),
+          ),
+          if (_changingCalendar) ...[
+            const _Hint('Re-enter the password to fetch and pick a different calendar.'),
+            ..._credentialFields(),
+          ],
+        ];
+    }
+  }
+
+  // --- Shared field builders --------------------------------------------
+
+  List<Widget> _alertsSection() {
+    return [
+      Text('Default reminders', style: Theme.of(context).textTheme.labelLarge),
+      const _Hint('Minutes before each event to alert (up to two). Leave blank for none.'),
+      const SizedBox(height: 8),
+      Row(
+        children: [
+          Expanded(
+            child: TextField(
+              controller: _alert1,
+              keyboardType: TextInputType.number,
+              decoration: const InputDecoration(labelText: 'Alert 1 (min)', hintText: 'e.g. 30'),
+            ),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: TextField(
+              controller: _alert2,
+              keyboardType: TextInputType.number,
+              decoration: const InputDecoration(labelText: 'Alert 2 (min)', hintText: 'e.g. 10'),
+            ),
+          ),
+        ],
+      ),
+    ];
+  }
+
+  Widget _googleCalendarIdField() => TextField(
+        controller: _calendarId,
+        decoration: const InputDecoration(
+          labelText: 'Google calendar ID',
+          hintText: 'primary or …@group.calendar.google.com',
+        ),
+      );
+
+  Widget _calendarPicker() {
+    if (_discovered.isEmpty) {
+      return const _Hint('Go back and fetch calendars to pick one.');
+    }
+    return DropdownButtonFormField<String>(
+      initialValue: _selectedCalendarUrl,
+      decoration: const InputDecoration(labelText: 'Calendar'),
+      items: [
+        for (final cal in _discovered)
+          DropdownMenuItem(
+            value: cal['url'] as String,
+            child: Text(cal['displayName'] as String, maxLines: 1, overflow: TextOverflow.ellipsis),
+          ),
+      ],
+      onChanged: (v) => setState(() => _selectedCalendarUrl = v),
+    );
+  }
+
+  /// Provider-specific credential inputs (+ CalDAV fetch). Shared by the wizard
+  /// credentials step and the edit "change calendar" panel.
+  List<Widget> _credentialFields() {
     switch (_provider) {
       case _Provider.email:
         return [
@@ -451,9 +665,6 @@ class _ConnectCalendarPageState extends ConsumerState<ConnectCalendarPage> {
       case _Provider.icloud:
       case _Provider.genericCaldav:
         return [
-          if (_editing && _selectedCalendarUrl != null)
-            _Hint('Current calendar: $_selectedCalendarUrl\n'
-                'Re-enter credentials and fetch to change it.'),
           TextField(
             controller: _address,
             decoration: const InputDecoration(
@@ -473,9 +684,7 @@ class _ConnectCalendarPageState extends ConsumerState<ConnectCalendarPage> {
             controller: _password,
             obscureText: true,
             decoration: InputDecoration(
-              labelText: _provider == _Provider.icloud
-                  ? 'App-specific password'
-                  : 'Password',
+              labelText: _provider == _Provider.icloud ? 'App-specific password' : 'Password',
               hintText: _editing ? 'Leave blank to keep current' : null,
             ),
           ),
@@ -491,32 +700,18 @@ class _ConnectCalendarPageState extends ConsumerState<ConnectCalendarPage> {
             label: const Text('Fetch calendars'),
           ),
           if (_discovered.isNotEmpty) ...[
-            const SizedBox(height: 12),
-            DropdownButtonFormField<String>(
-              initialValue: _selectedCalendarUrl,
-              decoration: const InputDecoration(labelText: 'Calendar'),
-              items: [
-                for (final cal in _discovered)
-                  DropdownMenuItem(
-                    value: cal['url'] as String,
-                    child: Text(cal['displayName'] as String,
-                        maxLines: 1, overflow: TextOverflow.ellipsis),
-                  ),
-              ],
-              onChanged: (v) => setState(() => _selectedCalendarUrl = v),
-            ),
+            const SizedBox(height: 8),
+            Text('${_discovered.length} calendar(s) found',
+                style: Theme.of(context).textTheme.bodySmall),
+            // On edit, the picker lives here so a re-fetch can switch calendars.
+            if (_editing) ...[
+              const SizedBox(height: 8),
+              _calendarPicker(),
+            ],
           ],
         ];
       case _Provider.google:
         return [
-          TextField(
-            controller: _calendarId,
-            decoration: const InputDecoration(
-              labelText: 'Google calendar ID',
-              hintText: 'primary or …@group.calendar.google.com',
-            ),
-          ),
-          const SizedBox(height: 12),
           TextField(
             controller: _accessToken,
             decoration: InputDecoration(
