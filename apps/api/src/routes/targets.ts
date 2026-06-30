@@ -18,10 +18,9 @@ import type { HonoEnv } from '../env.js';
 import { requireFamilyMember } from '../middleware/auth.js';
 import { storeSecret } from '../lib/secrets.js';
 import {
-  deferSync,
+  enqueueReconcile,
   getProductionRegistry,
   purgeTargetRemote,
-  syncMember,
 } from '../services/delivery.js';
 
 /** Load a target with the family it belongs to (for tenancy + ownership checks). */
@@ -106,11 +105,8 @@ targetRoutes.post('/calendar-targets', async (c) => {
       .returning()
   )[0]!;
 
-  // Reflect the owner's existing owned tasks onto the new calendar (background).
-  deferSync(
-    c.executionCtx,
-    syncMember(db, getProductionRegistry(c.env), c.env.KEK, parsed.data.memberId),
-  );
+  // Reflect the owner's existing owned tasks onto the new calendar (queued).
+  enqueueReconcile(c, { kind: 'member', memberId: parsed.data.memberId });
 
   // Never return credential material.
   const { credentialsRef: _omit, ...safe } = row;
@@ -217,12 +213,9 @@ targetRoutes.patch('/calendar-targets/:targetId', async (c) => {
     await db.select().from(calendarTargets).where(eq(calendarTargets.id, found.target.id)).limit(1)
   )[0]!;
 
-  // Reconcile after the change (active toggle, calendar switch, etc.) in the
-  // background so the response returns promptly.
-  deferSync(
-    c.executionCtx,
-    syncMember(db, getProductionRegistry(c.env), c.env.KEK, found.target.memberId),
-  );
+  // Reconcile after the change (active toggle, calendar switch, etc.) off the
+  // request path so the response returns promptly.
+  enqueueReconcile(c, { kind: 'member', memberId: found.target.memberId });
 
   const { credentialsRef: _omit, ...safe } = updated;
   return c.json({ target: safe });

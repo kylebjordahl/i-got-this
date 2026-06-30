@@ -13,10 +13,9 @@ import { Hono } from 'hono';
 import type { HonoEnv } from '../env.js';
 import { requireAdmin, requireFamilyMember } from '../middleware/auth.js';
 import {
-  deferSync,
+  enqueueReconcile,
   getProductionRegistry,
   syncFamily,
-  syncMember,
 } from '../services/delivery.js';
 
 /** Mounted under /families/:familyId (auth applied by parent router). */
@@ -134,12 +133,11 @@ taskRoutes.post('/tasks/:taskId/assign', async (c) => {
       .returning()
   )[0]!;
 
-  // Reconcile the new owner's calendars in the background; on a reassignment
-  // also reconcile the former owner so the event leaves their calendar.
-  const registry = getProductionRegistry(c.env);
-  deferSync(c.executionCtx, syncMember(db, registry, c.env.KEK, targetMemberId));
+  // Reconcile the new owner's calendars (queued); on a reassignment also
+  // reconcile the former owner so the event leaves their calendar.
+  enqueueReconcile(c, { kind: 'member', memberId: targetMemberId });
   if (formerOwner && formerOwner !== targetMemberId) {
-    deferSync(c.executionCtx, syncMember(db, registry, c.env.KEK, formerOwner));
+    enqueueReconcile(c, { kind: 'member', memberId: formerOwner });
   }
   return c.json({ task: updated });
 });
@@ -169,10 +167,7 @@ taskRoutes.post('/tasks/:taskId/unassign', async (c) => {
 
   // Reconcile the former owner's calendars (the event is no longer desired).
   if (formerOwner) {
-    deferSync(
-      c.executionCtx,
-      syncMember(db, getProductionRegistry(c.env), c.env.KEK, formerOwner),
-    );
+    enqueueReconcile(c, { kind: 'member', memberId: formerOwner });
   }
   return c.json({ task: updated });
 });
@@ -199,10 +194,7 @@ taskRoutes.post('/tasks/:taskId/dismiss', async (c) => {
       .returning()
   )[0]!;
   if (formerOwner) {
-    deferSync(
-      c.executionCtx,
-      syncMember(db, getProductionRegistry(c.env), c.env.KEK, formerOwner),
-    );
+    enqueueReconcile(c, { kind: 'member', memberId: formerOwner });
   }
   return c.json({ task: updated });
 });

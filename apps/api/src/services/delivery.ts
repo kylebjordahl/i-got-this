@@ -5,6 +5,7 @@ import {
   deliveries,
   eq,
   familyMembers,
+  getDb,
   ne,
   tasks,
 } from '@igt/db';
@@ -50,6 +51,67 @@ export function deferSync(
   work: Promise<unknown>,
 ): void {
   ctx.waitUntil(work.catch((err) => console.error('deferred reconcile failed', err)));
+}
+
+/** A unit of delivery work placed on the queue (or run inline as a fallback). */
+export type DeliveryJob =
+  | { kind: 'member'; memberId: string }
+  | { kind: 'family'; familyId: string };
+
+type ReconcileCtx = {
+  env: Bindings;
+  executionCtx: { waitUntil(p: Promise<unknown>): void };
+};
+
+function runJob(env: Bindings, job: DeliveryJob): Promise<SyncResult> {
+  const db = getDb(env.DB);
+  const registry = getProductionRegistry(env);
+  return job.kind === 'member'
+    ? syncMember(db, registry, env.KEK, job.memberId)
+    : syncFamily(db, registry, env.KEK, job.familyId);
+}
+
+/**
+ * Schedule a reconcile. When a Cloudflare Queue is bound (deployed envs) the job
+ * is enqueued for durable, retry-backed processing by the consumer. Otherwise
+ * (local dev / tests, no queue) it runs inline in the background via waitUntil —
+ * so behaviour is identical, just not durable.
+ */
+export function enqueueReconcile(c: ReconcileCtx, job: DeliveryJob): void {
+  const queue = c.env.DELIVERY_QUEUE;
+  if (queue) {
+    c.executionCtx.waitUntil(
+      queue.send(job).catch((err) => console.error('failed to enqueue delivery job', err)),
+    );
+    return;
+  }
+  deferSync(c.executionCtx, runJob(c.env, job));
+}
+
+/**
+ * Queue consumer: process delivery jobs, acking on success and asking Cloudflare
+ * to retry (with its built-in backoff, up to max_retries → dead-letter) on
+ * failure. Bound to the DELIVERY_QUEUE consumer in wrangler.jsonc.
+ */
+export async function deliveryQueueConsumer(
+  batch: MessageBatch<DeliveryJob>,
+  env: Bindings,
+): Promise<void> {
+  for (const message of batch.messages) {
+    try {
+      const result = await runJob(env, message.body);
+      if (result.errors.length > 0) {
+        // A per-target failure (e.g. iCloud briefly unreachable) → retry later.
+        console.error('delivery job had errors', message.body, result.errors);
+        message.retry();
+      } else {
+        message.ack();
+      }
+    } catch (err) {
+      console.error('delivery job threw', message.body, err);
+      message.retry();
+    }
+  }
 }
 
 function emptyResult(): SyncResult {

@@ -9,7 +9,12 @@ import {
 import type { DeliveryMethod } from '@igt/domain';
 import { describe, expect, it } from 'vitest';
 import { decryptSecret, encryptSecret, loadSecret } from '../src/lib/secrets.js';
-import { syncMember } from '../src/services/delivery.js';
+import {
+  type DeliveryJob,
+  deliveryQueueConsumer,
+  enqueueReconcile,
+  syncMember,
+} from '../src/services/delivery.js';
 import { authed, bearer, call, login } from './helpers.js';
 
 class FakeProvider implements DeliveryProvider {
@@ -137,6 +142,62 @@ describe('calendar reconcile (syncMember)', () => {
     expect(fake.cancels).toHaveLength(1);
     const after = await db.select().from(deliveries).where(eq(deliveries.taskId, task.id));
     expect(after).toHaveLength(0);
+  });
+});
+
+describe('delivery queue', () => {
+  it('enqueues a reconcile job when a queue is bound', async () => {
+    const sent: DeliveryJob[] = [];
+    const ctx = {
+      env: { ...env, DELIVERY_QUEUE: { send: async (j: DeliveryJob) => void sent.push(j) } },
+      executionCtx: { waitUntil: (_: Promise<unknown>) => {} },
+    };
+    enqueueReconcile(ctx as never, { kind: 'member', memberId: 'm-1' });
+    expect(sent).toEqual([{ kind: 'member', memberId: 'm-1' }]);
+  });
+
+  it('falls back to an inline reconcile when no queue is bound', async () => {
+    const awaited: Promise<unknown>[] = [];
+    const ctx = {
+      env, // no DELIVERY_QUEUE
+      executionCtx: { waitUntil: (p: Promise<unknown>) => void awaited.push(p) },
+    };
+    enqueueReconcile(ctx as never, { kind: 'family', familyId: 'does-not-exist' });
+    expect(awaited).toHaveLength(1);
+    // Runs inline (no targets for an unknown family ⇒ a clean empty result).
+    await expect(awaited[0]).resolves.toMatchObject({ targets: 0, errors: [] });
+  });
+
+  it('consumer processes a job and acks it (no errors)', async () => {
+    const { admin, familyId, memberId } = await adminFamily('queue-admin@example.com');
+    const db = getDb(env.DB);
+    const childRes = await call(
+      `/families/${familyId}/members`,
+      authed(admin.token, { relationName: 'child', requiresCaretaker: true }),
+    );
+    const childId = ((await childRes.json()) as { member: { id: string } }).member.id;
+    await db.insert(tasks).values({
+      familyId,
+      familyMemberId: childId,
+      type: 'pickup',
+      dtstart: new Date('2026-03-10T15:00:00Z'),
+      dtend: null,
+      status: 'owned',
+      ownerMemberId: memberId,
+      createdVia: 'manual',
+    });
+
+    let acked = 0;
+    let retried = 0;
+    const message = {
+      body: { kind: 'family', familyId } as DeliveryJob,
+      ack: () => void acked++,
+      retry: () => void retried++,
+    };
+    await deliveryQueueConsumer({ messages: [message] } as never, env);
+    // No calendar targets ⇒ reconcile is a clean no-op ⇒ ack, no retry.
+    expect(acked).toBe(1);
+    expect(retried).toBe(0);
   });
 });
 

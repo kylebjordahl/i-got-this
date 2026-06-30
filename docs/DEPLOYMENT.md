@@ -29,6 +29,7 @@ Routing / KV later). Keep binding names in sync between the two.
    with these permissions on your account:
    - **Account · Workers Scripts · Edit** (deploy the Worker)
    - **Account · D1 · Edit** (create DBs + apply migrations)
+   - **Account · Queues · Edit** (delivery queue + dead-letter queue)
    - **Account · Workers R2 Storage · Edit** (Terraform state bucket; see §4)
    - **Account · Email Routing · Edit** *(only once you wire inbound RSVP email)*
    - **Zone · DNS · Edit** + **Zone · Workers Routes · Edit** *(only if you put

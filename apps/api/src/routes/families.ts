@@ -11,7 +11,7 @@ import {
   requireAdmin,
   requireFamilyMember,
 } from '../middleware/auth.js';
-import { deferSync, getProductionRegistry, syncFamily } from '../services/delivery.js';
+import { enqueueReconcile } from '../services/delivery.js';
 import { createMemberClaimInvite } from '../services/invites.js';
 import { feedRoutes } from './feeds.js';
 import { targetRoutes } from './targets.js';
@@ -179,8 +179,8 @@ familyRoutes.patch('/:familyId/members/:memberId', requireFamilyMember, async (c
     await db.select().from(familyMembers).where(eq(familyMembers.id, memberId)).limit(1)
   )[0]!;
 
-  // The child's name appears in event titles — refresh calendars in the
-  // background so the response (and the edit modal) doesn't block on slow writes.
-  deferSync(c.executionCtx, syncFamily(db, getProductionRegistry(c.env), c.env.KEK, me.familyId));
+  // The child's name appears in event titles — reconcile calendars off the
+  // request path (queue when deployed) so the edit doesn't block on slow writes.
+  enqueueReconcile(c, { kind: 'family', familyId: me.familyId });
   return c.json({ member: updated });
 });

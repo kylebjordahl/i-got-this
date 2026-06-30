@@ -19,6 +19,24 @@ resource "cloudflare_d1_database" "primary" {
   name       = "${var.name_prefix}-${local.suffix}"
 }
 
+# --- Delivery queue (durable, retry-backed calendar reconcile) -----------
+#
+# The Worker enqueues reconcile jobs (binding DELIVERY_QUEUE) and consumes them
+# with built-in retries/backoff; exhausted messages land in the dead-letter
+# queue. The binding + consumer config live in apps/api/wrangler.jsonc — keep
+# the queue names in sync (igt-delivery-<env> / -dlq). Confirm the resource
+# schema against the pinned cloudflare provider version before apply.
+
+resource "cloudflare_queue" "delivery" {
+  account_id = var.cloudflare_account_id
+  name       = "${var.name_prefix}-delivery-${local.suffix}"
+}
+
+resource "cloudflare_queue" "delivery_dlq" {
+  account_id = var.cloudflare_account_id
+  name       = "${var.name_prefix}-delivery-${local.suffix}-dlq"
+}
+
 # --- Outbound email (Cloudflare Email Service) ---------------------------
 #
 # The Worker sends iMIP invites via the `send_email` binding (apps/api ->

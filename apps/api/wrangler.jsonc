@@ -48,7 +48,20 @@
           "database_id": "REPLACE_WITH_TERRAFORM_OUTPUT",
           "migrations_dir": "../../libs/db/migrations"
         }
-      ]
+      ],
+      // Durable, retry-backed calendar delivery (Terraform creates the queues).
+      "queues": {
+        "producers": [{ "binding": "DELIVERY_QUEUE", "queue": "igt-delivery-staging" }],
+        "consumers": [
+          {
+            "queue": "igt-delivery-staging",
+            "max_batch_size": 10,
+            "max_batch_timeout": 30,
+            "max_retries": 5,
+            "dead_letter_queue": "igt-delivery-staging-dlq"
+          }
+        ]
+      }
       // "send_email": [{ "name": "EMAIL" }]  // enable with a paid plan
     },
     "production": {
@@ -60,7 +73,19 @@
           "database_id": "REPLACE_WITH_TERRAFORM_OUTPUT",
           "migrations_dir": "../../libs/db/migrations"
         }
-      ]
+      ],
+      "queues": {
+        "producers": [{ "binding": "DELIVERY_QUEUE", "queue": "igt-delivery-prod" }],
+        "consumers": [
+          {
+            "queue": "igt-delivery-prod",
+            "max_batch_size": 10,
+            "max_batch_timeout": 30,
+            "max_retries": 5,
+            "dead_letter_queue": "igt-delivery-prod-dlq"
+          }
+        ]
+      }
       // "send_email": [{ "name": "EMAIL" }]  // enable with a paid plan
     }
   }

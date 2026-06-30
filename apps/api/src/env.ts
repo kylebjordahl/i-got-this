@@ -1,5 +1,6 @@
 import type { familyMembers } from "@igt/db";
 import type { SessionUser } from "./services/auth.js";
+import type { DeliveryJob } from "./services/delivery.js";
 
 /** Worker bindings (kept in sync with wrangler.jsonc + Terraform). */
 export interface Bindings {
@@ -11,6 +12,11 @@ export interface Bindings {
     ORGANIZER_EMAIL?: string;
     /** Cloudflare Email Service `send_email` binding (outbound iMIP). */
     EMAIL?: SendEmail;
+    /**
+     * Cloudflare Queue for durable, retry-backed calendar delivery. Bound in
+     * deployed envs; unset locally/in tests (reconciles run inline instead).
+     */
+    DELIVERY_QUEUE?: Queue<DeliveryJob>;
     /**
      * Comma-separated allowed Apple `aud` values for Sign in with Apple — your
      * iOS bundle id and/or web Services ID. Unset ⇒ Apple login disabled.

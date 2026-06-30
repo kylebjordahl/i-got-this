@@ -3,6 +3,7 @@ import { Hono } from 'hono';
 import { cors } from 'hono/cors';
 import type { HonoEnv } from './env.js';
 import { authMiddleware } from './middleware/auth.js';
+import { deliveryQueueConsumer } from './services/delivery.js';
 import { authRoutes } from './routes/auth.js';
 import { familyRoutes } from './routes/families.js';
 import { inviteRoutes } from './routes/invites.js';
@@ -62,4 +63,4 @@ app.route('/families', familyRoutes);
 
 app.notFound((c) => c.json({ error: 'not_found' }, 404));
 
-export default { fetch: app.fetch, scheduled };
+export default { fetch: app.fetch, scheduled, queue: deliveryQueueConsumer };

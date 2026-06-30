@@ -19,9 +19,8 @@ import { requireAdmin, requireFamilyMember } from '../middleware/auth.js';
 import { ingestFamilyFeeds, ingestFeed } from '../services/ingest.js';
 import { buildFeedTasks } from '../services/tasks.js';
 import {
-  deferSync,
+  enqueueReconcile,
   getProductionRegistry,
-  syncFamily,
   syncMember,
 } from '../services/delivery.js';
 
@@ -200,7 +199,7 @@ feedRoutes.patch('/:feedId/member-links/:linkId', requireAdmin, async (c) => {
   await db.update(sourceEvents).set({ tasksBuiltHash: null }).where(eq(sourceEvents.feedId, feedId));
   const feed = (await db.select().from(feeds).where(eq(feeds.id, feedId)).limit(1))[0];
   if (feed) await buildFeedTasks(db, feed);
-  deferSync(c.executionCtx, syncFamily(db, getProductionRegistry(c.env), c.env.KEK, familyId));
+  enqueueReconcile(c, { kind: 'family', familyId });
 
   const updated = await loadLink(db, familyId, feedId, link.id);
   return c.json({ link: updated });
@@ -286,7 +285,7 @@ feedRoutes.post('/:feedId/events/:eventId/dismiss', requireAdmin, async (c) => {
 
   const feed = (await db.select().from(feeds).where(eq(feeds.id, feedId)).limit(1))[0];
   if (feed) await buildFeedTasks(db, feed);
-  deferSync(c.executionCtx, syncFamily(db, getProductionRegistry(c.env), c.env.KEK, familyId));
+  enqueueReconcile(c, { kind: 'family', familyId });
   return c.json({ ok: true });
 });
 
@@ -311,7 +310,7 @@ feedRoutes.post('/:feedId/events/:eventId/restore', requireAdmin, async (c) => {
 
   const feed = (await db.select().from(feeds).where(eq(feeds.id, feedId)).limit(1))[0];
   if (feed) await buildFeedTasks(db, feed);
-  deferSync(c.executionCtx, syncFamily(db, getProductionRegistry(c.env), c.env.KEK, familyId));
+  enqueueReconcile(c, { kind: 'family', familyId });
   return c.json({ ok: true });
 });
 
@@ -337,7 +336,7 @@ feedRoutes.post('/:feedId/refresh', async (c) => {
 
   const ingest = await ingestFeed(db, feed);
   const build = await buildFeedTasks(db, feed);
-  deferSync(c.executionCtx, syncFamily(db, getProductionRegistry(c.env), c.env.KEK, familyId));
+  enqueueReconcile(c, { kind: 'family', familyId });
   return c.json({ ingest, build });
 });
 
@@ -352,10 +351,6 @@ feedRoutes.post('/refresh-all', async (c) => {
   for (const feed of familyFeeds) {
     build.push(await buildFeedTasks(db, feed));
   }
-  try {
-    await syncFamily(db, getProductionRegistry(c.env), c.env.KEK, familyId);
-  } catch (err) {
-    console.error('syncFamily (refresh-all) failed', err);
-  }
+  enqueueReconcile(c, { kind: 'family', familyId });
   return c.json({ ingest, build });
 });
