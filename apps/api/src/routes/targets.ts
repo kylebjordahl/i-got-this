@@ -18,6 +18,7 @@ import type { HonoEnv } from '../env.js';
 import { requireFamilyMember } from '../middleware/auth.js';
 import { storeSecret } from '../lib/secrets.js';
 import {
+  deferSync,
   getProductionRegistry,
   purgeTargetRemote,
   syncMember,
@@ -105,12 +106,11 @@ targetRoutes.post('/calendar-targets', async (c) => {
       .returning()
   )[0]!;
 
-  // Reflect the owner's existing owned tasks onto the new calendar.
-  try {
-    await syncMember(db, getProductionRegistry(c.env), c.env.KEK, parsed.data.memberId);
-  } catch (err) {
-    console.error('syncMember (target create) failed', err);
-  }
+  // Reflect the owner's existing owned tasks onto the new calendar (background).
+  deferSync(
+    c.executionCtx,
+    syncMember(db, getProductionRegistry(c.env), c.env.KEK, parsed.data.memberId),
+  );
 
   // Never return credential material.
   const { credentialsRef: _omit, ...safe } = row;
@@ -217,12 +217,12 @@ targetRoutes.patch('/calendar-targets/:targetId', async (c) => {
     await db.select().from(calendarTargets).where(eq(calendarTargets.id, found.target.id)).limit(1)
   )[0]!;
 
-  // Reconcile after the change (active toggle, calendar switch, etc.).
-  try {
-    await syncMember(db, getProductionRegistry(c.env), c.env.KEK, found.target.memberId);
-  } catch (err) {
-    console.error('syncMember (target update) failed', err);
-  }
+  // Reconcile after the change (active toggle, calendar switch, etc.) in the
+  // background so the response returns promptly.
+  deferSync(
+    c.executionCtx,
+    syncMember(db, getProductionRegistry(c.env), c.env.KEK, found.target.memberId),
+  );
 
   const { credentialsRef: _omit, ...safe } = updated;
   return c.json({ target: safe });

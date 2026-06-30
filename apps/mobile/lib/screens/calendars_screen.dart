@@ -14,6 +14,7 @@ class CalendarsScreen extends ConsumerWidget {
     return Scaffold(
       appBar: AppBar(title: const Text('Calendars')),
       floatingActionButton: FloatingActionButton.extended(
+        heroTag: 'fab-calendars',
         onPressed: () async {
           final added = await Navigator.of(context).push<bool>(
             MaterialPageRoute(builder: (_) => const ConnectCalendarPage()),

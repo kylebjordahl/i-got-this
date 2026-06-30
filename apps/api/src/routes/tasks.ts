@@ -12,6 +12,7 @@ import { Hono } from 'hono';
 import type { HonoEnv } from '../env.js';
 import { requireAdmin, requireFamilyMember } from '../middleware/auth.js';
 import {
+  deferSync,
   getProductionRegistry,
   syncFamily,
   syncMember,
@@ -77,7 +78,11 @@ taskRoutes.get('/tasks', async (c) => {
   return c.json({ tasks: rows });
 });
 
-/** Take ownership of a task (defaults to the caller; admins may assign others). */
+/**
+ * Assign a task to a caretaker — claim it for yourself (default) or hand it to
+ * any other caretaker in the family. Works from both the unowned and an already
+ * owned state (reassignment).
+ */
 taskRoutes.post('/tasks/:taskId/assign', async (c) => {
   const parsed = AssignTaskInput.safeParse(
     await c.req.json().catch(() => ({})),
@@ -87,11 +92,6 @@ taskRoutes.post('/tasks/:taskId/assign', async (c) => {
   const db = getDb(c.env.DB);
   const me = c.get('member');
   const targetMemberId = parsed.data.memberId ?? me.id;
-
-  // Only admins may assign someone other than themselves.
-  if (targetMemberId !== me.id && !me.isAdmin) {
-    return c.json({ error: 'forbidden_admin' }, 403);
-  }
 
   // Target must be a caretaker in this family.
   const target = (
@@ -124,6 +124,7 @@ taskRoutes.post('/tasks/:taskId/assign', async (c) => {
   )[0];
   if (!task) return c.json({ error: 'task_not_found' }, 404);
 
+  const formerOwner = task.ownerMemberId;
   const updated = (
     await db
       .update(tasks)
@@ -132,11 +133,12 @@ taskRoutes.post('/tasks/:taskId/assign', async (c) => {
       .returning()
   )[0]!;
 
-  // Best-effort: reconcile the new owner's calendars. Assignment succeeds regardless.
-  try {
-    await syncMember(db, getProductionRegistry(c.env), c.env.KEK, targetMemberId);
-  } catch (err) {
-    console.error('syncMember (assign) failed', err);
+  // Reconcile the new owner's calendars in the background; on a reassignment
+  // also reconcile the former owner so the event leaves their calendar.
+  const registry = getProductionRegistry(c.env);
+  deferSync(c.executionCtx, syncMember(db, registry, c.env.KEK, targetMemberId));
+  if (formerOwner && formerOwner !== targetMemberId) {
+    deferSync(c.executionCtx, syncMember(db, registry, c.env.KEK, formerOwner));
   }
   return c.json({ task: updated });
 });
@@ -166,11 +168,10 @@ taskRoutes.post('/tasks/:taskId/unassign', async (c) => {
 
   // Reconcile the former owner's calendars (the event is no longer desired).
   if (formerOwner) {
-    try {
-      await syncMember(db, getProductionRegistry(c.env), c.env.KEK, formerOwner);
-    } catch (err) {
-      console.error('syncMember (unassign) failed', err);
-    }
+    deferSync(
+      c.executionCtx,
+      syncMember(db, getProductionRegistry(c.env), c.env.KEK, formerOwner),
+    );
   }
   return c.json({ task: updated });
 });

@@ -17,6 +17,7 @@ class FeedsScreen extends ConsumerWidget {
       appBar: AppBar(title: const Text('Feeds')),
       floatingActionButton: isAdmin
           ? FloatingActionButton.extended(
+              heroTag: 'fab-feeds',
               onPressed: () async {
                 final added = await showDialog<bool>(
                   context: context,

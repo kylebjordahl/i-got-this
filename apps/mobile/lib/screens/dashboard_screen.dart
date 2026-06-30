@@ -53,6 +53,12 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
     _refreshTasks();
   }
 
+  Future<void> _assign(String taskId, String memberId) async {
+    final familyId = await ref.read(familyProvider.future);
+    await ref.read(apiClientProvider).assignTask(familyId, taskId, memberId: memberId);
+    _refreshTasks();
+  }
+
   Future<void> _release(String taskId) async {
     final familyId = await ref.read(familyProvider.future);
     await ref.read(apiClientProvider).unassignTask(familyId, taskId);
@@ -64,6 +70,7 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
     final tasksAsync = ref.watch(_showAll ? allTasksProvider : unownedTasksProvider);
     final members = ref.watch(membersProvider).valueOrNull ?? const <Member>[];
     final names = {for (final m in members) m.id: m.relationName};
+    final caretakers = members.where((m) => m.isCaretaker).toList();
 
     return Scaffold(
       appBar: AppBar(
@@ -124,8 +131,10 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
                     : _GroupedTaskList(
                         tasks: tasks,
                         names: names,
+                        caretakers: caretakers,
                         onClaim: _claim,
                         onRelease: _release,
+                        onAssign: _assign,
                       ),
               ),
             ),
@@ -140,14 +149,18 @@ class _GroupedTaskList extends StatelessWidget {
   const _GroupedTaskList({
     required this.tasks,
     required this.names,
+    required this.caretakers,
     required this.onClaim,
     required this.onRelease,
+    required this.onAssign,
   });
 
   final List<TaskItem> tasks;
   final Map<String, String> names;
+  final List<Member> caretakers;
   final void Function(String taskId) onClaim;
   final void Function(String taskId) onRelease;
+  final void Function(String taskId, String memberId) onAssign;
 
   @override
   Widget build(BuildContext context) {
@@ -181,14 +194,37 @@ class _GroupedTaskList extends StatelessWidget {
         final subtitle = owner != null
             ? '${friendlyTime(t.start)} · ${t.status == 'owned' ? owner : ''}'
             : friendlyTime(t.start);
+        final owned = t.status == 'owned';
+        // Caretakers the task can be (re)assigned to — everyone but the owner.
+        final assignable =
+            caretakers.where((m) => m.id != t.ownerMemberId).toList();
         children.add(
           ListTile(
             leading: CircleAvatar(child: Icon(_iconFor(t.type))),
             title: Text('${t.typeLabel} · $child'),
             subtitle: Text(subtitle),
-            trailing: t.status == 'owned'
-                ? TextButton(onPressed: () => onRelease(t.id), child: const Text('Release'))
-                : FilledButton(onPressed: () => onClaim(t.id), child: const Text('Claim')),
+            trailing: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                owned
+                    ? TextButton(onPressed: () => onRelease(t.id), child: const Text('Release'))
+                    : FilledButton(onPressed: () => onClaim(t.id), child: const Text('Claim')),
+                if (assignable.isNotEmpty)
+                  PopupMenuButton<String>(
+                    tooltip: owned ? 'Reassign' : 'Assign to…',
+                    icon: const Icon(Icons.person_add_alt),
+                    onSelected: (memberId) => onAssign(t.id, memberId),
+                    itemBuilder: (_) => [
+                      PopupMenuItem<String>(
+                        enabled: false,
+                        child: Text(owned ? 'Reassign to' : 'Assign to'),
+                      ),
+                      for (final m in assignable)
+                        PopupMenuItem<String>(value: m.id, child: Text(m.relationName)),
+                    ],
+                  ),
+              ],
+            ),
           ),
         );
       }

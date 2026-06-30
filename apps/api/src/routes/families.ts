@@ -11,7 +11,7 @@ import {
   requireAdmin,
   requireFamilyMember,
 } from '../middleware/auth.js';
-import { getProductionRegistry, syncFamily } from '../services/delivery.js';
+import { deferSync, getProductionRegistry, syncFamily } from '../services/delivery.js';
 import { feedRoutes } from './feeds.js';
 import { targetRoutes } from './targets.js';
 import { taskRoutes } from './tasks.js';
@@ -148,11 +148,8 @@ familyRoutes.patch('/:familyId/members/:memberId', requireFamilyMember, async (c
     await db.select().from(familyMembers).where(eq(familyMembers.id, memberId)).limit(1)
   )[0]!;
 
-  // The child's name appears in event titles — refresh calendars best-effort.
-  try {
-    await syncFamily(db, getProductionRegistry(c.env), c.env.KEK, me.familyId);
-  } catch (err) {
-    console.error('syncFamily (member update) failed', err);
-  }
+  // The child's name appears in event titles — refresh calendars in the
+  // background so the response (and the edit modal) doesn't block on slow writes.
+  deferSync(c.executionCtx, syncFamily(db, getProductionRegistry(c.env), c.env.KEK, me.familyId));
   return c.json({ member: updated });
 });

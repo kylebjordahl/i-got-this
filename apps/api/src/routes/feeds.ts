@@ -18,7 +18,7 @@ import type { HonoEnv } from '../env.js';
 import { requireAdmin, requireFamilyMember } from '../middleware/auth.js';
 import { ingestFamilyFeeds, ingestFeed } from '../services/ingest.js';
 import { buildFeedTasks } from '../services/tasks.js';
-import { getProductionRegistry, syncFamily } from '../services/delivery.js';
+import { deferSync, getProductionRegistry, syncFamily } from '../services/delivery.js';
 
 /** Mounted under /families/:familyId/feeds (auth applied by parent router). */
 export const feedRoutes = new Hono<HonoEnv>();
@@ -195,11 +195,7 @@ feedRoutes.patch('/:feedId/member-links/:linkId', requireAdmin, async (c) => {
   await db.update(sourceEvents).set({ tasksBuiltHash: null }).where(eq(sourceEvents.feedId, feedId));
   const feed = (await db.select().from(feeds).where(eq(feeds.id, feedId)).limit(1))[0];
   if (feed) await buildFeedTasks(db, feed);
-  try {
-    await syncFamily(db, getProductionRegistry(c.env), c.env.KEK, familyId);
-  } catch (err) {
-    console.error('syncFamily (link update) failed', err);
-  }
+  deferSync(c.executionCtx, syncFamily(db, getProductionRegistry(c.env), c.env.KEK, familyId));
 
   const updated = await loadLink(db, familyId, feedId, link.id);
   return c.json({ link: updated });
@@ -223,11 +219,7 @@ feedRoutes.delete('/:feedId/member-links/:linkId', requireAdmin, async (c) => {
         eq(tasks.status, 'unowned'),
       ),
     );
-  try {
-    await syncFamily(db, getProductionRegistry(c.env), c.env.KEK, familyId);
-  } catch (err) {
-    console.error('syncFamily (link delete) failed', err);
-  }
+  deferSync(c.executionCtx, syncFamily(db, getProductionRegistry(c.env), c.env.KEK, familyId));
   return c.json({ ok: true });
 });
 
@@ -253,11 +245,7 @@ feedRoutes.post('/:feedId/refresh', async (c) => {
 
   const ingest = await ingestFeed(db, feed);
   const build = await buildFeedTasks(db, feed);
-  try {
-    await syncFamily(db, getProductionRegistry(c.env), c.env.KEK, c.get('member').familyId);
-  } catch (err) {
-    console.error('syncFamily (refresh) failed', err);
-  }
+  deferSync(c.executionCtx, syncFamily(db, getProductionRegistry(c.env), c.env.KEK, familyId));
   return c.json({ ingest, build });
 });
 

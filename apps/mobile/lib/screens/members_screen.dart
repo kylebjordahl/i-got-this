@@ -18,6 +18,7 @@ class MembersScreen extends ConsumerWidget {
       appBar: AppBar(title: const Text('Family')),
       floatingActionButton: (me?.isAdmin ?? false)
           ? FloatingActionButton.extended(
+              heroTag: 'fab-members',
               onPressed: () async {
                 final added = await showDialog<bool>(
                   context: context,

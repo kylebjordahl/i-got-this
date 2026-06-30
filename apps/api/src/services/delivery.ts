@@ -39,6 +39,19 @@ export interface SyncResult {
   errors: { targetId: string; taskId?: string; error: string }[];
 }
 
+/**
+ * Run a reconcile in the background so the HTTP response returns immediately —
+ * CalDAV/Google writes are slow and would otherwise block the request (e.g. a
+ * rename re-pushing every event). In tests, `waitOnExecutionContext` awaits
+ * this, keeping assertions deterministic. Errors are logged, never thrown.
+ */
+export function deferSync(
+  ctx: { waitUntil(p: Promise<unknown>): void },
+  work: Promise<unknown>,
+): void {
+  ctx.waitUntil(work.catch((err) => console.error('deferred reconcile failed', err)));
+}
+
 function emptyResult(): SyncResult {
   return { targets: 0, created: 0, updated: 0, removed: 0, errors: [] };
 }
