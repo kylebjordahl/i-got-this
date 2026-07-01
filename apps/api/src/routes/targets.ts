@@ -3,26 +3,17 @@ import {
   calendarTargets,
   type Db,
   eq,
+  externalAccounts,
   familyMembers,
   getDb,
-  secrets,
 } from '@igt/db';
 import {
-  CalDavDiscoverInput,
   CreateCalendarTargetInput,
-  GoogleAuthorizeUrlInput,
   UpdateCalendarTargetInput,
 } from '@igt/domain';
-import { createCalDavClient } from '@igt/ical';
 import { Hono } from 'hono';
-import type { Bindings, HonoEnv } from '../env.js';
+import type { HonoEnv } from '../env.js';
 import { requireFamilyMember } from '../middleware/auth.js';
-import {
-  buildGoogleAuthorizeUrl,
-  exchangeGoogleCode,
-  googleOAuthConfigured,
-} from '../lib/google-oauth.js';
-import { storeSecret } from '../lib/secrets.js';
 import {
   enqueueReconcile,
   getProductionRegistry,
@@ -40,64 +31,17 @@ async function loadTarget(db: Db, targetId: string) {
   return rows[0] ?? null;
 }
 
-type Credential =
-  | { username?: string; password?: string; accessToken?: string; authCode?: string; redirectUri?: string }
-  | undefined;
-
-/**
- * Build the (JSON) credential payload to encrypt for a target, or null if none.
- * For Google, an authCode + redirectUri is exchanged for a stored refresh token;
- * a pasted accessToken is still accepted as a fallback.
- */
-async function buildCredentialPayload(
-  env: Bindings,
-  method: string,
-  cred: Credential,
-): Promise<{ payload: string } | { error: string; status: 400 | 500 } | null> {
-  if (!cred) return null;
-  const hasMaterial = cred.password || cred.accessToken || cred.authCode;
-  if (!hasMaterial) return null;
-
-  if (method === 'google') {
-    if (cred.authCode && cred.redirectUri) {
-      try {
-        const tokens = await exchangeGoogleCode(env, {
-          code: cred.authCode,
-          redirectUri: cred.redirectUri,
-        });
-        if (!tokens.refreshToken) return { error: 'google_no_refresh_token', status: 400 };
-        return { payload: JSON.stringify({ kind: 'oauth', refreshToken: tokens.refreshToken }) };
-      } catch (err) {
-        console.error('google code exchange failed', err);
-        return { error: 'google_exchange_failed', status: 400 };
-      }
-    }
-    if (cred.accessToken) {
-      return { payload: JSON.stringify({ kind: 'oauth', accessToken: cred.accessToken }) };
-    }
-    return null;
-  }
-  return {
-    payload: JSON.stringify({ kind: 'basic', username: cred.username, password: cred.password }),
-  };
-}
-
 /** Mounted under /families/:familyId (auth applied by parent router). */
 export const targetRoutes = new Hono<HonoEnv>();
 targetRoutes.use('*', requireFamilyMember);
 
-/** Build a Google OAuth consent URL (the client opens it, then sends us the code). */
-targetRoutes.post('/google/authorize-url', async (c) => {
-  if (!googleOAuthConfigured(c.env)) return c.json({ error: 'google_oauth_not_configured' }, 501);
-  const parsed = GoogleAuthorizeUrlInput.safeParse(await c.req.json().catch(() => null));
-  if (!parsed.success) return c.json({ error: 'invalid', issues: parsed.error.issues }, 400);
-  return c.json({ url: buildGoogleAuthorizeUrl(c.env, { redirectUri: parsed.data.redirectUri }) });
-});
-
 /**
- * Create a calendar target for a caretaker. A member manages their own targets;
- * admins may manage anyone's. Credentials (caldav password / google token) are
- * envelope-encrypted into a `secret`.
+ * Create an output feed (calendar target) for a caretaker. `email` targets stand
+ * alone. `caldav`/`google` targets draw their credential from a connected
+ * `externalAccountId`; the account must belong to the caller (owner-only), its
+ * kind must match the method, and it may only target a caretaker member linked to
+ * that same owner. The target calendar (addressOrUrl / externalCalendarId) is
+ * captured immutably here.
  */
 targetRoutes.post('/calendar-targets', async (c) => {
   const parsed = CreateCalendarTargetInput.safeParse(
@@ -107,61 +51,75 @@ targetRoutes.post('/calendar-targets', async (c) => {
     return c.json({ error: 'invalid', issues: parsed.error.issues }, 400);
   }
   const me = c.get('member');
-  if (parsed.data.memberId !== me.id && !me.isAdmin) {
+  const d = parsed.data;
+
+  // A member manages their own output feeds; admins may manage anyone's.
+  if (d.memberId !== me.id && !me.isAdmin) {
     return c.json({ error: 'forbidden' }, 403);
   }
 
   const db = getDb(c.env.DB);
 
   // Target member must belong to this family.
-  const target = (
+  const targetMember = (
     await db
       .select()
       .from(familyMembers)
-      .where(
-        and(
-          eq(familyMembers.id, parsed.data.memberId),
-          eq(familyMembers.familyId, me.familyId),
-        ),
-      )
+      .where(and(eq(familyMembers.id, d.memberId), eq(familyMembers.familyId, me.familyId)))
       .limit(1)
   )[0];
-  if (!target) return c.json({ error: 'member_not_found' }, 404);
+  if (!targetMember) return c.json({ error: 'member_not_found' }, 404);
 
-  // Encrypt any provided credential (Google: exchange the auth code first).
-  let credentialsRef: string | null = null;
-  const built = await buildCredentialPayload(c.env, parsed.data.method, parsed.data.credential);
-  if (built && 'error' in built) return c.json({ error: built.error }, built.status);
-  if (built) {
-    if (!c.env.KEK) return c.json({ error: 'kek_unconfigured' }, 500);
-    credentialsRef = await storeSecret(db, c.env.KEK, me.familyId, built.payload);
+  let externalAccountId: string | null = null;
+  let providerHint: 'icloud' | 'google' | 'generic_caldav' | null = null;
+
+  if (d.method !== 'email') {
+    const account = (
+      await db
+        .select()
+        .from(externalAccounts)
+        .where(
+          and(
+            eq(externalAccounts.id, d.externalAccountId!),
+            eq(externalAccounts.userId, c.get('user').id),
+          ),
+        )
+        .limit(1)
+    )[0];
+    if (!account) return c.json({ error: 'account_not_found' }, 404);
+    const accountMethod = account.kind === 'google' ? 'google' : 'caldav';
+    if (d.method !== accountMethod) return c.json({ error: 'account_kind_mismatch' }, 400);
+    // The account's calendars may only feed a caretaker role assigned to the owner.
+    if (!targetMember.isCaretaker) return c.json({ error: 'not_a_caretaker' }, 400);
+    if (targetMember.userId !== account.userId) return c.json({ error: 'member_not_owned' }, 403);
+    externalAccountId = account.id;
+    providerHint =
+      account.kind === 'icloud' ? 'icloud' : account.kind === 'google' ? 'google' : 'generic_caldav';
   }
 
   const row = (
     await db
       .insert(calendarTargets)
       .values({
-        memberId: parsed.data.memberId,
-        name: parsed.data.name,
-        method: parsed.data.method,
-        providerHint: parsed.data.providerHint ?? null,
-        addressOrUrl: parsed.data.addressOrUrl,
-        externalCalendarId: parsed.data.externalCalendarId ?? null,
-        alertMinutes: parsed.data.alertMinutes ?? null,
-        credentialsRef,
+        memberId: d.memberId,
+        name: d.name,
+        method: d.method,
+        providerHint,
+        externalAccountId,
+        addressOrUrl: d.addressOrUrl,
+        externalCalendarId: d.externalCalendarId ?? null,
+        alertMinutes: d.alertMinutes ?? null,
       })
       .returning()
   )[0]!;
 
   // Reflect the owner's existing owned tasks onto the new calendar (queued).
-  enqueueReconcile(c, { kind: 'member', memberId: parsed.data.memberId });
+  enqueueReconcile(c, { kind: 'member', memberId: d.memberId });
 
-  // Never return credential material.
-  const { credentialsRef: _omit, ...safe } = row;
-  return c.json({ target: safe }, 201);
+  return c.json({ target: row }, 201);
 });
 
-/** List calendar targets (own; admins see the whole family). Credentials are never returned. */
+/** List output feeds (own; admins see the whole family). */
 targetRoutes.get('/calendar-targets', async (c) => {
   const db = getDb(c.env.DB);
   const me = c.get('member');
@@ -173,6 +131,7 @@ targetRoutes.get('/calendar-targets', async (c) => {
     name: calendarTargets.name,
     method: calendarTargets.method,
     providerHint: calendarTargets.providerHint,
+    externalAccountId: calendarTargets.externalAccountId,
     addressOrUrl: calendarTargets.addressOrUrl,
     externalCalendarId: calendarTargets.externalCalendarId,
     alertMinutes: calendarTargets.alertMinutes,
@@ -191,35 +150,10 @@ targetRoutes.get('/calendar-targets', async (c) => {
 });
 
 /**
- * Discover the CalDAV calendars available for a set of credentials (no storage).
- * The client uses this to let the caretaker pick which calendar to write to.
+ * Update an output feed's config (own; any admin). Only name / active / alerts
+ * are editable — the method, linked account, and target calendar are immutable
+ * (delete + recreate to change them).
  */
-targetRoutes.post('/caldav/discover', async (c) => {
-  const parsed = CalDavDiscoverInput.safeParse(await c.req.json().catch(() => null));
-  if (!parsed.success) {
-    return c.json({ error: 'invalid', issues: parsed.error.issues }, 400);
-  }
-  try {
-    const client = await createCalDavClient({
-      serverUrl: parsed.data.serverUrl,
-      username: parsed.data.username,
-      password: parsed.data.password,
-    });
-    const calendars = await client.fetchCalendars();
-    const list = calendars.map((cal) => ({
-      url: cal.url,
-      displayName:
-        typeof cal.displayName === 'string' && cal.displayName.length > 0
-          ? cal.displayName
-          : cal.url,
-    }));
-    return c.json({ calendars: list });
-  } catch (err) {
-    return c.json({ error: 'discover_failed', message: String(err) }, 400);
-  }
-});
-
-/** Update a calendar target (own; admins any). Credentials are re-encrypted. */
 targetRoutes.patch('/calendar-targets/:targetId', async (c) => {
   const parsed = UpdateCalendarTargetInput.safeParse(await c.req.json().catch(() => null));
   if (!parsed.success) {
@@ -237,20 +171,7 @@ targetRoutes.patch('/calendar-targets/:targetId', async (c) => {
   const set: Partial<typeof calendarTargets.$inferInsert> = {};
   if (d.name !== undefined) set.name = d.name;
   if (d.active !== undefined) set.active = d.active;
-  if (d.addressOrUrl !== undefined) set.addressOrUrl = d.addressOrUrl;
-  if (d.externalCalendarId !== undefined) set.externalCalendarId = d.externalCalendarId;
-  if (d.providerHint !== undefined) set.providerHint = d.providerHint;
   if (d.alertMinutes !== undefined) set.alertMinutes = d.alertMinutes;
-
-  const built = await buildCredentialPayload(c.env, found.target.method, d.credential);
-  if (built && 'error' in built) return c.json({ error: built.error }, built.status);
-  if (built) {
-    if (!c.env.KEK) return c.json({ error: 'kek_unconfigured' }, 500);
-    set.credentialsRef = await storeSecret(db, c.env.KEK, me.familyId, built.payload);
-    if (found.target.credentialsRef) {
-      await db.delete(secrets).where(eq(secrets.id, found.target.credentialsRef));
-    }
-  }
 
   if (Object.keys(set).length > 0) {
     await db.update(calendarTargets).set(set).where(eq(calendarTargets.id, found.target.id));
@@ -259,15 +180,14 @@ targetRoutes.patch('/calendar-targets/:targetId', async (c) => {
     await db.select().from(calendarTargets).where(eq(calendarTargets.id, found.target.id)).limit(1)
   )[0]!;
 
-  // Reconcile after the change (active toggle, calendar switch, etc.) off the
+  // Reconcile after the change (active toggle, alert change, etc.) off the
   // request path so the response returns promptly.
   enqueueReconcile(c, { kind: 'member', memberId: found.target.memberId });
 
-  const { credentialsRef: _omit, ...safe } = updated;
-  return c.json({ target: safe });
+  return c.json({ target: updated });
 });
 
-/** Delete a calendar target (own; admins any) + its stored credential. */
+/** Delete an output feed (own; admins any). Its remote events are removed first. */
 targetRoutes.delete('/calendar-targets/:targetId', async (c) => {
   const db = getDb(c.env.DB);
   const me = c.get('member');
@@ -285,8 +205,5 @@ targetRoutes.delete('/calendar-targets/:targetId', async (c) => {
   }
 
   await db.delete(calendarTargets).where(eq(calendarTargets.id, found.target.id));
-  if (found.target.credentialsRef) {
-    await db.delete(secrets).where(eq(secrets.id, found.target.credentialsRef));
-  }
   return c.json({ ok: true });
 });

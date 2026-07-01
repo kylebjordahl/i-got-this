@@ -100,20 +100,84 @@ class ApiClient {
   Future<Map<String, dynamic>> acceptInvite(String token) async =>
       _obj(await _dio.post('/invites/$token/accept', data: <String, dynamic>{}, options: _auth));
 
+  // --- External accounts (user-owned, reusable across families) ----------
+
+  Future<List<dynamic>> listAccounts() async =>
+      _list(await _dio.get('/accounts', options: _auth), 'accounts');
+
+  /// Connect an external account. Google: `authCode` + `redirectUri`.
+  /// iCloud/CalDAV: `username` + `password` (+ `serverUrl` for generic CalDAV).
+  Future<Map<String, dynamic>> createExternalAccount({
+    required String kind, // 'google' | 'icloud' | 'caldav'
+    required String name,
+    String? serverUrl,
+    String? username,
+    String? password,
+    String? authCode,
+    String? redirectUri,
+  }) async {
+    final res = await _dio.post(
+      '/accounts',
+      data: {
+        'kind': kind,
+        'name': name,
+        if (serverUrl != null) 'serverUrl': serverUrl,
+        if (username != null) 'username': username,
+        if (password != null) 'password': password,
+        if (authCode != null) 'authCode': authCode,
+        if (redirectUri != null) 'redirectUri': redirectUri,
+      },
+      options: _auth,
+    );
+    return _obj(res);
+  }
+
+  Future<void> deleteAccount(String accountId) async {
+    await _dio.delete('/accounts/$accountId', options: _auth);
+  }
+
+  /// The calendars available in a connected account: a list of `{ id, name }`.
+  Future<List<dynamic>> listAccountCalendars(String accountId) async => _list(
+      await _dio.post('/accounts/$accountId/calendars',
+          data: <String, dynamic>{}, options: _auth),
+      'calendars');
+
+  /// Google OAuth consent URL for connecting a new account.
+  Future<String> accountGoogleAuthorizeUrl(String redirectUri) async {
+    final res = await _dio.post('/accounts/google/authorize-url',
+        data: {'redirectUri': redirectUri}, options: _auth);
+    return (res.data as Map<String, dynamic>)['url'] as String;
+  }
+
   // --- Feeds -------------------------------------------------------------
 
   Future<List<dynamic>> listFeeds(String familyId) async =>
       _list(await _dio.get('/families/$familyId/feeds', options: _auth), 'feeds');
 
+  /// Create an input feed: a public ICS URL (`kind: 'ics'`, pass `url`) or a
+  /// calendar from a connected account (`kind: 'caldav' | 'google'`, pass
+  /// `externalAccountId` + `sourceCalendarId`).
   Future<Map<String, dynamic>> createFeed(
     String familyId, {
-    required String url,
     required String mode, // 'explicit' | 'exception'
+    String kind = 'ics',
+    String? url,
+    String? externalAccountId,
+    String? sourceCalendarId,
+    String? sourceCalendarName,
     int refreshMinutes = 360,
   }) async {
     final res = await _dio.post(
       '/families/$familyId/feeds',
-      data: {'url': url, 'mode': mode, 'refreshMinutes': refreshMinutes},
+      data: {
+        'kind': kind,
+        'mode': mode,
+        'refreshMinutes': refreshMinutes,
+        if (url != null) 'url': url,
+        if (externalAccountId != null) 'externalAccountId': externalAccountId,
+        if (sourceCalendarId != null) 'sourceCalendarId': sourceCalendarId,
+        if (sourceCalendarName != null) 'sourceCalendarName': sourceCalendarName,
+      },
       options: _auth,
     );
     return _obj(res);
@@ -256,16 +320,19 @@ class ApiClient {
   Future<List<dynamic>> listCalendarTargets(String familyId) async => _list(
       await _dio.get('/families/$familyId/calendar-targets', options: _auth), 'targets');
 
+  /// Create an output feed. `email` targets stand alone (pass the address as
+  /// `addressOrUrl`). `caldav`/`google` targets draw their credential from a
+  /// connected `externalAccountId`; `addressOrUrl` (CalDAV collection URL /
+  /// Google calendar id) + `externalCalendarId` name the target calendar.
   Future<Map<String, dynamic>> createCalendarTarget(
     String familyId, {
     required String memberId,
     required String name,
     required String method, // 'email' | 'caldav' | 'google'
-    String? providerHint,
+    String? externalAccountId,
     required String addressOrUrl,
     String? externalCalendarId,
     List<int>? alertMinutes,
-    Map<String, String>? credential,
   }) async {
     final res = await _dio.post(
       '/families/$familyId/calendar-targets',
@@ -273,65 +340,31 @@ class ApiClient {
         'memberId': memberId,
         'name': name,
         'method': method,
-        if (providerHint != null) 'providerHint': providerHint,
+        if (externalAccountId != null) 'externalAccountId': externalAccountId,
         'addressOrUrl': addressOrUrl,
         if (externalCalendarId != null) 'externalCalendarId': externalCalendarId,
         if (alertMinutes != null) 'alertMinutes': alertMinutes,
-        if (credential != null) 'credential': credential,
       },
       options: _auth,
     );
     return _obj(res);
   }
 
-  /// Build a Google OAuth consent URL for `redirectUri` (the client opens it,
-  /// then sends back the resulting authorization code on the target).
-  Future<String> googleAuthorizeUrl(String familyId, String redirectUri) async {
-    final res = await _dio.post(
-      '/families/$familyId/google/authorize-url',
-      data: {'redirectUri': redirectUri},
-      options: _auth,
-    );
-    return (res.data as Map<String, dynamic>)['url'] as String;
-  }
-
-  /// Discover the calendars available for a set of CalDAV credentials.
-  /// Returns a list of `{ url, displayName }`.
-  Future<List<dynamic>> discoverCalDavCalendars(
-    String familyId, {
-    required String serverUrl,
-    required String username,
-    required String password,
-  }) async {
-    final res = await _dio.post(
-      '/families/$familyId/caldav/discover',
-      data: {'serverUrl': serverUrl, 'username': username, 'password': password},
-      options: _auth,
-    );
-    return _list(res, 'calendars');
-  }
-
+  /// Update an output feed's config. Only name / active / alerts are editable;
+  /// the method, account, and target calendar are immutable (recreate to change).
   Future<void> updateCalendarTarget(
     String familyId,
     String targetId, {
     String? name,
     bool? active,
-    String? addressOrUrl,
-    String? externalCalendarId,
-    String? providerHint,
     List<int>? alertMinutes,
-    Map<String, String>? credential,
   }) async {
     await _dio.patch(
       '/families/$familyId/calendar-targets/$targetId',
       data: {
         if (name != null) 'name': name,
         if (active != null) 'active': active,
-        if (addressOrUrl != null) 'addressOrUrl': addressOrUrl,
-        if (externalCalendarId != null) 'externalCalendarId': externalCalendarId,
-        if (providerHint != null) 'providerHint': providerHint,
         if (alertMinutes != null) 'alertMinutes': alertMinutes,
-        if (credential != null) 'credential': credential,
       },
       options: _auth,
     );

@@ -3,6 +3,7 @@ import {
   buildCancelICalendar,
   buildInviteICalendar,
   createCalDavClient,
+  fetchGoogleOccurrences,
   hashOccurrence,
   parseAndExpand,
   type InviteEventInput,
@@ -129,5 +130,60 @@ END:VCALENDAR`;
       password: 'app-specific-password',
     });
     expect(client).toBeInstanceOf(Promise);
+  });
+
+  it('maps Google events.list into occurrences (timed, all-day, recurrence, cancelled)', async () => {
+    const page = {
+      items: [
+        {
+          iCalUID: 'timed@g',
+          status: 'confirmed',
+          summary: 'Pickup',
+          location: 'Gym',
+          start: { dateTime: '2026-08-03T15:00:00Z' },
+          end: { dateTime: '2026-08-03T16:00:00Z' },
+        },
+        {
+          iCalUID: 'holiday@g',
+          status: 'confirmed',
+          summary: 'Closed',
+          start: { date: '2026-08-04' },
+          end: { date: '2026-08-05' },
+        },
+        {
+          iCalUID: 'series@g',
+          recurringEventId: 'series@g',
+          status: 'confirmed',
+          summary: 'Class',
+          start: { dateTime: '2026-08-05T09:00:00Z' },
+          end: { dateTime: '2026-08-05T10:00:00Z' },
+        },
+        { iCalUID: 'gone@g', status: 'cancelled', start: { dateTime: '2026-08-06T09:00:00Z' } },
+      ],
+    };
+    const fetchImpl = (async (url: string) => {
+      expect(String(url)).toContain('/calendars/primary/events');
+      return { ok: true, status: 200, json: async () => page };
+    }) as unknown as typeof fetch;
+
+    const occ = await fetchGoogleOccurrences(
+      'access-token',
+      'primary',
+      {
+        windowStart: new Date('2026-08-01T00:00:00Z'),
+        windowEnd: new Date('2026-09-01T00:00:00Z'),
+      },
+      fetchImpl,
+    );
+
+    expect(occ).toHaveLength(3); // cancelled dropped
+    const holiday = occ.find((o) => o.uid === 'holiday@g')!;
+    expect(holiday.allDay).toBe(true);
+    expect(holiday.start.toISOString()).toBe('2026-08-04T00:00:00.000Z');
+    const timed = occ.find((o) => o.uid === 'timed@g')!;
+    expect(timed.allDay).toBe(false);
+    expect(timed.recurrenceId).toBeNull();
+    // A recurrence instance carries a recurrenceId so (uid, recurrenceId) stays unique.
+    expect(occ.find((o) => o.uid === 'series@g')!.recurrenceId).toBe('2026-08-05T09:00:00.000Z');
   });
 });

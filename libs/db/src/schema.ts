@@ -10,6 +10,7 @@ import {
   AttendanceRequirement,
   DeliveryMethod,
   DeliveryStatus,
+  ExternalAccountKind,
   FeedKind,
   FeedMode,
   FeedStatus,
@@ -115,6 +116,37 @@ export const familyMembers = sqliteTable(
   }),
 );
 
+// --- External accounts (user-owned calendar connections) -----------------
+
+/**
+ * A calendar account (Google, iCloud, generic CalDAV) connected by a single
+ * user. Private to that user but reusable across every family they belong to;
+ * only the owner may draw its calendars into input/output feeds. The credential
+ * lives in `secrets` with `familyId = null` (user-owned, not family-scoped).
+ */
+export const externalAccounts = sqliteTable(
+  'external_accounts',
+  {
+    id: id(),
+    userId: text('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    kind: text('kind', { enum: ExternalAccountKind.options }).notNull(),
+    name: text('name').notNull(),
+    // CalDAV server/base URL (iCloud uses a well-known default); null for google.
+    serverUrl: text('server_url'),
+    // Basic-auth username for caldav/icloud (display + auth); null for google.
+    username: text('username'),
+    credentialsRef: text('credentials_ref').references(() => secrets.id, {
+      onDelete: 'set null',
+    }),
+    createdAt: createdAt(),
+  },
+  (t) => ({
+    userIdx: index('external_accounts_user_idx').on(t.userId),
+  }),
+);
+
 // --- Feeds & baselines ---------------------------------------------------
 
 export const feeds = sqliteTable(
@@ -125,7 +157,16 @@ export const feeds = sqliteTable(
       .notNull()
       .references(() => families.id, { onDelete: 'cascade' }),
     kind: text('kind', { enum: FeedKind.options }).notNull().default('ics'),
-    url: text('url').notNull(),
+    // ICS feeds: the public URL. Account feeds: null (source lives on the account).
+    url: text('url'),
+    // Account-backed feeds: the connected account + its immutable target calendar
+    // (CalDAV collection URL or Google calendar id). Null for ICS feeds.
+    externalAccountId: text('external_account_id').references(
+      () => externalAccounts.id,
+      { onDelete: 'set null' },
+    ),
+    sourceCalendarId: text('source_calendar_id'),
+    sourceCalendarName: text('source_calendar_name'),
     mode: text('mode', { enum: FeedMode.options }).notNull(),
     // IANA timezone the calendar's wall-clock times are in (from X-WR-TIMEZONE);
     // used to interpret exception baseline times. Null ⇒ treated as UTC.
@@ -331,11 +372,14 @@ export const calendarTargets = sqliteTable(
     name: text('name').notNull(),
     method: text('method', { enum: DeliveryMethod.options }).notNull(),
     providerHint: text('provider_hint', { enum: ProviderHint.options }),
-    // email: the delivery address. caldav: the collection URL. google: unused.
+    // caldav/google outputs draw their credential from this connected account;
+    // null for standalone email targets.
+    externalAccountId: text('external_account_id').references(
+      () => externalAccounts.id,
+      { onDelete: 'set null' },
+    ),
+    // email: the delivery address. caldav: the collection URL. google: the calendar id.
     addressOrUrl: text('address_or_url').notNull(),
-    credentialsRef: text('credentials_ref').references(() => secrets.id, {
-      onDelete: 'set null',
-    }),
     externalCalendarId: text('external_calendar_id'),
     // JSON array of minutes-before-start for default alerts (max 2), e.g. [30,10].
     alertMinutes: text('alert_minutes', { mode: 'json' }).$type<number[]>(),
@@ -484,6 +528,7 @@ export const schema = {
   identities,
   families,
   familyMembers,
+  externalAccounts,
   feeds,
   familyMemberFeeds,
   sourceEvents,

@@ -1,6 +1,7 @@
 import {
   and,
   eq,
+  externalAccounts,
   familyMemberFeeds,
   familyMembers,
   feeds,
@@ -11,10 +12,12 @@ import {
 import {
   CreateFeedInput,
   MemberFeedLinkInput,
+  UpdateFeedInput,
   UpdateMemberFeedLinkInput,
 } from '@igt/domain';
 import { Hono } from 'hono';
-import type { HonoEnv } from '../env.js';
+import type { Bindings, HonoEnv } from '../env.js';
+import { googleRefresherFor } from '../lib/google-oauth.js';
 import { requireAdmin, requireFamilyMember } from '../middleware/auth.js';
 import { ingestFamilyFeeds, ingestFeed } from '../services/ingest.js';
 import { buildFeedTasks } from '../services/tasks.js';
@@ -24,29 +27,113 @@ import {
   syncMember,
 } from '../services/delivery.js';
 
+/** Ingest secrets (KEK + Google refresher) needed to read account-backed feeds. */
+function ingestSecrets(env: Bindings) {
+  return { kek: env.KEK, googleRefresh: googleRefresherFor(env) };
+}
+
 /** Mounted under /families/:familyId/feeds (auth applied by parent router). */
 export const feedRoutes = new Hono<HonoEnv>();
 feedRoutes.use('*', requireFamilyMember);
 
-/** Create an input feed (admin). */
+/**
+ * Create an input feed (admin). A public ICS URL (`kind: 'ics'`), or a calendar
+ * from a connected external account (`kind: 'caldav' | 'google'`). Account-backed
+ * feeds require the caller to be the account's owner, and the account kind must
+ * match (google account → google feed; caldav/icloud account → caldav feed).
+ */
 feedRoutes.post('/', requireAdmin, async (c) => {
   const parsed = CreateFeedInput.safeParse(await c.req.json().catch(() => null));
   if (!parsed.success) {
     return c.json({ error: 'invalid', issues: parsed.error.issues }, 400);
   }
-  const feed = (
-    await getDb(c.env.DB)
-      .insert(feeds)
-      .values({
-        familyId: c.get('member').familyId,
-        url: parsed.data.url,
-        kind: parsed.data.kind,
-        mode: parsed.data.mode,
-        refreshMinutes: parsed.data.refreshMinutes,
-      })
-      .returning()
-  )[0]!;
+  const db = getDb(c.env.DB);
+  const familyId = c.get('member').familyId;
+  const d = parsed.data;
+
+  const values: typeof feeds.$inferInsert = {
+    familyId,
+    kind: d.kind,
+    mode: d.mode,
+    refreshMinutes: d.refreshMinutes,
+    url: null,
+    externalAccountId: null,
+    sourceCalendarId: null,
+    sourceCalendarName: null,
+  };
+
+  if (d.kind === 'ics') {
+    values.url = d.url ?? null;
+  } else {
+    // Owner-only: only the account's owner may draw its calendars into a feed.
+    const account = (
+      await db
+        .select()
+        .from(externalAccounts)
+        .where(
+          and(
+            eq(externalAccounts.id, d.externalAccountId!),
+            eq(externalAccounts.userId, c.get('user').id),
+          ),
+        )
+        .limit(1)
+    )[0];
+    if (!account) return c.json({ error: 'account_not_found' }, 404);
+    const expectedKind = account.kind === 'google' ? 'google' : 'caldav';
+    if (d.kind !== expectedKind) return c.json({ error: 'account_kind_mismatch' }, 400);
+    values.externalAccountId = account.id;
+    values.sourceCalendarId = d.sourceCalendarId ?? null;
+    values.sourceCalendarName = d.sourceCalendarName ?? null;
+  }
+
+  const feed = (await db.insert(feeds).values(values).returning())[0]!;
   return c.json({ feed }, 201);
+});
+
+/**
+ * Update an input feed's config (admin). Only `mode` / `refreshMinutes` /
+ * `status` are editable — the source (ICS url or the account's target calendar)
+ * is immutable; change it by deleting and recreating the feed. A mode change
+ * rebuilds the feed's tasks (mode drives task generation).
+ */
+feedRoutes.patch('/:feedId', requireAdmin, async (c) => {
+  const parsed = UpdateFeedInput.safeParse(await c.req.json().catch(() => null));
+  if (!parsed.success) {
+    return c.json({ error: 'invalid', issues: parsed.error.issues }, 400);
+  }
+  const db = getDb(c.env.DB);
+  const familyId = c.get('member').familyId;
+  const feedId = c.req.param('feedId');
+  const feed = (
+    await db
+      .select()
+      .from(feeds)
+      .where(and(eq(feeds.id, feedId), eq(feeds.familyId, familyId)))
+      .limit(1)
+  )[0];
+  if (!feed) return c.json({ error: 'not_found' }, 404);
+
+  const d = parsed.data;
+  const set: Partial<typeof feeds.$inferInsert> = {};
+  if (d.mode !== undefined) set.mode = d.mode;
+  if (d.refreshMinutes !== undefined) set.refreshMinutes = d.refreshMinutes;
+  if (d.status !== undefined) set.status = d.status;
+  if (Object.keys(set).length > 0) {
+    await db.update(feeds).set(set).where(eq(feeds.id, feed.id));
+  }
+
+  const modeChanged = d.mode !== undefined && d.mode !== feed.mode;
+  if (modeChanged) {
+    await db.delete(tasks).where(and(eq(tasks.feedId, feed.id), eq(tasks.status, 'unowned')));
+    await db.update(sourceEvents).set({ tasksBuiltHash: null }).where(eq(sourceEvents.feedId, feed.id));
+  }
+
+  const updated = (await db.select().from(feeds).where(eq(feeds.id, feed.id)).limit(1))[0]!;
+  if (modeChanged) {
+    await buildFeedTasks(db, updated);
+    enqueueReconcile(c, { kind: 'family', familyId });
+  }
+  return c.json({ feed: updated });
 });
 
 /** List a family's feeds. */
@@ -334,7 +421,7 @@ feedRoutes.post('/:feedId/refresh', async (c) => {
     .set({ lastRefreshRequestedAt: new Date() })
     .where(eq(feeds.id, feed.id));
 
-  const ingest = await ingestFeed(db, feed);
+  const ingest = await ingestFeed(db, feed, ingestSecrets(c.env));
   const build = await buildFeedTasks(db, feed);
   enqueueReconcile(c, { kind: 'family', familyId });
   return c.json({ ingest, build });
@@ -344,7 +431,7 @@ feedRoutes.post('/:feedId/refresh', async (c) => {
 feedRoutes.post('/refresh-all', async (c) => {
   const db = getDb(c.env.DB);
   const familyId = c.get('member').familyId;
-  const ingest = await ingestFamilyFeeds(db, familyId);
+  const ingest = await ingestFamilyFeeds(db, familyId, ingestSecrets(c.env));
 
   const familyFeeds = await db.select().from(feeds).where(eq(feeds.familyId, familyId));
   const build = [];

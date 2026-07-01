@@ -12,5 +12,8 @@
     "ical-generator": "^8.0.0",
     "ical.js": "^2.2.0",
     "tsdav": "^2.3.0"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20240909.0"
   }
 }

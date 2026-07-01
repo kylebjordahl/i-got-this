@@ -23,6 +23,19 @@ export function googleOAuthConfigured(env: Bindings): boolean {
   return Boolean(env.GOOGLE_OAUTH_CLIENT_ID && env.GOOGLE_OAUTH_CLIENT_SECRET);
 }
 
+/**
+ * A refresh-token→access-token exchanger bound to this env, or undefined when
+ * Google OAuth isn't configured. Shared by delivery (output feeds) and ingest
+ * (Google input feeds) so the client secret stays in `apps/api`.
+ */
+export function googleRefresherFor(
+  env: Bindings,
+): ((refreshToken: string) => Promise<string>) | undefined {
+  return googleOAuthConfigured(env)
+    ? (refreshToken: string) => refreshGoogleAccessToken(env, refreshToken)
+    : undefined;
+}
+
 /** The consent URL to send the user to. `access_type=offline` + `prompt=consent`
  *  are required to receive a refresh token. */
 export function buildGoogleAuthorizeUrl(

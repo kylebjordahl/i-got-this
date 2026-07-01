@@ -1,1 +1,0 @@
-ALTER TABLE `source_events` ADD `dismissed_at` integer;

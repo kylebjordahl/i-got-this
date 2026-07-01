@@ -1,16 +1,29 @@
+CREATE TABLE `auth_tokens` (
+	`id` text PRIMARY KEY NOT NULL,
+	`purpose` text DEFAULT 'magic_link' NOT NULL,
+	`email` text NOT NULL,
+	`token_hash` text NOT NULL,
+	`expires_at` integer NOT NULL,
+	`consumed_at` integer,
+	`created_at` integer NOT NULL
+);
+--> statement-breakpoint
+CREATE UNIQUE INDEX `auth_tokens_token_hash_unique` ON `auth_tokens` (`token_hash`);--> statement-breakpoint
+CREATE INDEX `auth_tokens_email_idx` ON `auth_tokens` (`email`);--> statement-breakpoint
 CREATE TABLE `calendar_targets` (
 	`id` text PRIMARY KEY NOT NULL,
 	`member_id` text NOT NULL,
 	`name` text NOT NULL,
 	`method` text NOT NULL,
 	`provider_hint` text,
+	`external_account_id` text,
 	`address_or_url` text NOT NULL,
-	`credentials_ref` text,
 	`external_calendar_id` text,
+	`alert_minutes` text,
 	`active` integer DEFAULT true NOT NULL,
 	`created_at` integer NOT NULL,
 	FOREIGN KEY (`member_id`) REFERENCES `family_members`(`id`) ON UPDATE no action ON DELETE cascade,
-	FOREIGN KEY (`credentials_ref`) REFERENCES `secrets`(`id`) ON UPDATE no action ON DELETE set null
+	FOREIGN KEY (`external_account_id`) REFERENCES `external_accounts`(`id`) ON UPDATE no action ON DELETE set null
 );
 --> statement-breakpoint
 CREATE INDEX `calendar_targets_member_idx` ON `calendar_targets` (`member_id`);--> statement-breakpoint
@@ -44,6 +57,7 @@ CREATE TABLE `deliveries` (
 	`external_ref` text,
 	`ical_uid` text,
 	`sequence` integer DEFAULT 0 NOT NULL,
+	`payload_hash` text,
 	`rsvp_status` text DEFAULT 'none' NOT NULL,
 	`sent_at` integer,
 	`created_at` integer NOT NULL,
@@ -53,6 +67,20 @@ CREATE TABLE `deliveries` (
 --> statement-breakpoint
 CREATE INDEX `deliveries_task_idx` ON `deliveries` (`task_id`);--> statement-breakpoint
 CREATE INDEX `deliveries_ical_uid_idx` ON `deliveries` (`ical_uid`);--> statement-breakpoint
+CREATE TABLE `external_accounts` (
+	`id` text PRIMARY KEY NOT NULL,
+	`user_id` text NOT NULL,
+	`kind` text NOT NULL,
+	`name` text NOT NULL,
+	`server_url` text,
+	`username` text,
+	`credentials_ref` text,
+	`created_at` integer NOT NULL,
+	FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE cascade,
+	FOREIGN KEY (`credentials_ref`) REFERENCES `secrets`(`id`) ON UPDATE no action ON DELETE set null
+);
+--> statement-breakpoint
+CREATE INDEX `external_accounts_user_idx` ON `external_accounts` (`user_id`);--> statement-breakpoint
 CREATE TABLE `families` (
 	`id` text PRIMARY KEY NOT NULL,
 	`name` text NOT NULL,
@@ -67,6 +95,8 @@ CREATE TABLE `family_member_feeds` (
 	`weekday_mask` integer,
 	`day_start` text,
 	`day_end` text,
+	`duration_minutes` integer,
+	`location` text,
 	`generates_types` text,
 	`default_attendance` text,
 	`active` integer DEFAULT true NOT NULL,
@@ -97,15 +127,20 @@ CREATE TABLE `feeds` (
 	`id` text PRIMARY KEY NOT NULL,
 	`family_id` text NOT NULL,
 	`kind` text DEFAULT 'ics' NOT NULL,
-	`url` text NOT NULL,
+	`url` text,
+	`external_account_id` text,
+	`source_calendar_id` text,
+	`source_calendar_name` text,
 	`mode` text NOT NULL,
+	`timezone` text,
 	`refresh_minutes` integer DEFAULT 360 NOT NULL,
 	`etag` text,
 	`last_synced_at` integer,
 	`last_refresh_requested_at` integer,
 	`status` text DEFAULT 'active' NOT NULL,
 	`created_at` integer NOT NULL,
-	FOREIGN KEY (`family_id`) REFERENCES `families`(`id`) ON UPDATE no action ON DELETE cascade
+	FOREIGN KEY (`family_id`) REFERENCES `families`(`id`) ON UPDATE no action ON DELETE cascade,
+	FOREIGN KEY (`external_account_id`) REFERENCES `external_accounts`(`id`) ON UPDATE no action ON DELETE set null
 );
 --> statement-breakpoint
 CREATE INDEX `feeds_family_idx` ON `feeds` (`family_id`);--> statement-breakpoint
@@ -125,6 +160,7 @@ CREATE TABLE `invites` (
 	`type` text NOT NULL,
 	`family_id` text,
 	`issued_by_member_id` text,
+	`member_id` text,
 	`email` text,
 	`token` text NOT NULL,
 	`grant_is_caretaker` integer DEFAULT true NOT NULL,
@@ -133,7 +169,8 @@ CREATE TABLE `invites` (
 	`expires_at` integer,
 	`created_at` integer NOT NULL,
 	FOREIGN KEY (`family_id`) REFERENCES `families`(`id`) ON UPDATE no action ON DELETE cascade,
-	FOREIGN KEY (`issued_by_member_id`) REFERENCES `family_members`(`id`) ON UPDATE no action ON DELETE set null
+	FOREIGN KEY (`issued_by_member_id`) REFERENCES `family_members`(`id`) ON UPDATE no action ON DELETE set null,
+	FOREIGN KEY (`member_id`) REFERENCES `family_members`(`id`) ON UPDATE no action ON DELETE cascade
 );
 --> statement-breakpoint
 CREATE UNIQUE INDEX `invites_token_unique` ON `invites` (`token`);--> statement-breakpoint
@@ -162,6 +199,17 @@ CREATE TABLE `secrets` (
 	FOREIGN KEY (`family_id`) REFERENCES `families`(`id`) ON UPDATE no action ON DELETE cascade
 );
 --> statement-breakpoint
+CREATE TABLE `sessions` (
+	`id` text PRIMARY KEY NOT NULL,
+	`user_id` text NOT NULL,
+	`token_hash` text NOT NULL,
+	`expires_at` integer NOT NULL,
+	`created_at` integer NOT NULL,
+	FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE cascade
+);
+--> statement-breakpoint
+CREATE UNIQUE INDEX `sessions_token_hash_unique` ON `sessions` (`token_hash`);--> statement-breakpoint
+CREATE INDEX `sessions_user_idx` ON `sessions` (`user_id`);--> statement-breakpoint
 CREATE TABLE `source_events` (
 	`id` text PRIMARY KEY NOT NULL,
 	`feed_id` text NOT NULL,
@@ -170,11 +218,13 @@ CREATE TABLE `source_events` (
 	`recurrence_id` text,
 	`dtstart` integer NOT NULL,
 	`dtend` integer,
+	`all_day` integer DEFAULT false NOT NULL,
 	`summary` text,
 	`location` text,
 	`raw` text,
 	`content_hash` text NOT NULL,
 	`tasks_built_hash` text,
+	`dismissed_at` integer,
 	`created_at` integer NOT NULL,
 	FOREIGN KEY (`feed_id`) REFERENCES `feeds`(`id`) ON UPDATE no action ON DELETE cascade,
 	FOREIGN KEY (`family_id`) REFERENCES `families`(`id`) ON UPDATE no action ON DELETE cascade
@@ -185,6 +235,7 @@ CREATE INDEX `source_events_feed_idx` ON `source_events` (`feed_id`);--> stateme
 CREATE TABLE `tasks` (
 	`id` text PRIMARY KEY NOT NULL,
 	`family_id` text NOT NULL,
+	`feed_id` text,
 	`source_event_id` text,
 	`family_member_id` text NOT NULL,
 	`type` text NOT NULL,
@@ -197,6 +248,7 @@ CREATE TABLE `tasks` (
 	`created_via` text NOT NULL,
 	`created_at` integer NOT NULL,
 	FOREIGN KEY (`family_id`) REFERENCES `families`(`id`) ON UPDATE no action ON DELETE cascade,
+	FOREIGN KEY (`feed_id`) REFERENCES `feeds`(`id`) ON UPDATE no action ON DELETE cascade,
 	FOREIGN KEY (`source_event_id`) REFERENCES `source_events`(`id`) ON UPDATE no action ON DELETE cascade,
 	FOREIGN KEY (`family_member_id`) REFERENCES `family_members`(`id`) ON UPDATE no action ON DELETE cascade,
 	FOREIGN KEY (`owner_member_id`) REFERENCES `family_members`(`id`) ON UPDATE no action ON DELETE set null

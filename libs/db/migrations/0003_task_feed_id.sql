@@ -1,1 +1,0 @@
-ALTER TABLE `tasks` ADD `feed_id` text REFERENCES feeds(id);

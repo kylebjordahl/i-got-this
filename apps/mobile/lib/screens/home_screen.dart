@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'accounts_screen.dart';
 import 'calendars_screen.dart';
 import 'dashboard_screen.dart';
 import 'feeds_screen.dart';
@@ -20,6 +21,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
   static const _pages = [
     DashboardScreen(),
     MembersScreen(),
+    AccountsScreen(),
     FeedsScreen(),
     CalendarsScreen(),
   ];
@@ -34,6 +36,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
         destinations: const [
           NavigationDestination(icon: Icon(Icons.checklist), label: 'Tasks'),
           NavigationDestination(icon: Icon(Icons.child_care), label: 'Family'),
+          NavigationDestination(icon: Icon(Icons.link), label: 'Accounts'),
           NavigationDestination(icon: Icon(Icons.rss_feed), label: 'Feeds'),
           NavigationDestination(icon: Icon(Icons.event), label: 'Calendars'),
         ],
