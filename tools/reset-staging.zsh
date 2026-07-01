@@ -18,7 +18,14 @@ API_DIR="${DIR:h}/apps/api"          # wrangler.jsonc lives here
 
 print "⚠️  This DESTROYS all data in the '${ENV}' D1 database. Ctrl-C to abort."
 print "→ dropping all tables (remote)…"
-( cd "$API_DIR" && npx wrangler d1 execute "$DB" --env "$ENV" --remote --yes --file "$DIR/reset-staging.sql" )
+# Run the drops via --command, NOT --file: `wrangler d1 execute --remote --file`
+# uploads through the D1 /import API, which fails with "Authentication error
+# [code: 10000]" under a `wrangler login` OAuth token. --command uses the /query
+# path (the same one `migrations apply` uses), which works. Strip SQL comments +
+# blank lines so they don't swallow the now-single-line command, keeping
+# reset-staging.sql as the readable source of truth for the drop list.
+DROP_SQL="$(grep -vE '^[[:space:]]*(--|$)' "$DIR/reset-staging.sql" | tr '\n' ' ')"
+( cd "$API_DIR" && npx wrangler d1 execute "$DB" --env "$ENV" --remote --yes --command "$DROP_SQL" )
 
 print "→ re-applying the baseline migration…"
 ( cd "$API_DIR" && npx wrangler d1 migrations apply "$DB" --env "$ENV" --remote )
