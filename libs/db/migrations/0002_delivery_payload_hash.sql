@@ -1,1 +1,0 @@
-ALTER TABLE `deliveries` ADD `payload_hash` text;

@@ -8,8 +8,13 @@ import { z } from 'zod';
 
 // --- Enums ---------------------------------------------------------------
 
-export const FeedKind = z.enum(['ics']);
+/** Where an input feed's events come from: a public ICS URL, or a calendar in a connected account. */
+export const FeedKind = z.enum(['ics', 'caldav', 'google']);
 export type FeedKind = z.infer<typeof FeedKind>;
+
+/** A user-owned external calendar connection. iCloud is CalDAV with a well-known URL. */
+export const ExternalAccountKind = z.enum(['google', 'icloud', 'caldav']);
+export type ExternalAccountKind = z.infer<typeof ExternalAccountKind>;
 
 /** `explicit` = feed events create tasks; `exception` = deviations from a baseline. */
 export const FeedMode = z.enum(['explicit', 'exception']);
@@ -117,13 +122,87 @@ export const CreateFamilyInput = z.object({
 });
 export type CreateFamilyInput = z.infer<typeof CreateFamilyInput>;
 
-export const CreateFeedInput = z.object({
-  url: z.string().url(),
-  kind: FeedKind.default('ics'),
-  mode: FeedMode,
-  refreshMinutes: z.number().int().min(15).max(10080).default(360),
-});
+const RefreshMinutes = z.number().int().min(15).max(10080).default(360);
+
+/**
+ * Create an input feed. Either a public ICS URL (`kind: 'ics'`, the default) or a
+ * calendar drawn from a connected external account (`kind: 'caldav' | 'google'`,
+ * with `externalAccountId` + the immutable `sourceCalendarId`). `sourceCalendarId`
+ * is the CalDAV collection URL or the Google calendar id.
+ */
+export const CreateFeedInput = z
+  .object({
+    kind: FeedKind.default('ics'),
+    mode: FeedMode,
+    refreshMinutes: RefreshMinutes,
+    // ics
+    url: z.string().url().optional(),
+    // account-backed
+    externalAccountId: Id.optional(),
+    sourceCalendarId: z.string().min(1).optional(),
+    sourceCalendarName: z.string().max(256).optional(),
+  })
+  .superRefine((v, ctx) => {
+    if (v.kind === 'ics') {
+      if (!v.url) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['url'], message: 'url is required for ics feeds' });
+      }
+    } else {
+      if (!v.externalAccountId) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['externalAccountId'], message: 'externalAccountId is required for account feeds' });
+      }
+      if (!v.sourceCalendarId) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['sourceCalendarId'], message: 'sourceCalendarId is required for account feeds' });
+      }
+    }
+  });
 export type CreateFeedInput = z.infer<typeof CreateFeedInput>;
+
+/**
+ * Partial update for an input feed (admin). The feed's source — its `url` or the
+ * external account's target calendar — is immutable; change it by recreating.
+ */
+export const UpdateFeedInput = z.object({
+  mode: FeedMode.optional(),
+  refreshMinutes: z.number().int().min(15).max(10080).optional(),
+  status: FeedStatus.optional(),
+});
+export type UpdateFeedInput = z.infer<typeof UpdateFeedInput>;
+
+/**
+ * Connect an external calendar account (owned by the calling user, reusable
+ * across their families). Google runs the OAuth consent flow client-side and
+ * sends the `authCode` + `redirectUri` (exchanged for a stored refresh token);
+ * iCloud/CalDAV use basic auth (`username` + app-specific `password`). iCloud
+ * defaults to the well-known CalDAV URL when `serverUrl` is omitted.
+ */
+export const CreateExternalAccountInput = z
+  .object({
+    kind: ExternalAccountKind,
+    name: z.string().min(1).max(120),
+    // google
+    authCode: z.string().min(1).optional(),
+    redirectUri: z.string().url().optional(),
+    // caldav / icloud
+    username: z.string().min(1).optional(),
+    password: z.string().min(1).optional(),
+    serverUrl: z.string().url().optional(),
+  })
+  .superRefine((v, ctx) => {
+    if (v.kind === 'google') {
+      if (!v.authCode || !v.redirectUri) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['authCode'], message: 'authCode + redirectUri are required for google accounts' });
+      }
+    } else {
+      if (!v.username || !v.password) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['password'], message: 'username + password are required for caldav/icloud accounts' });
+      }
+      if (v.kind === 'caldav' && !v.serverUrl) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['serverUrl'], message: 'serverUrl is required for generic caldav accounts' });
+      }
+    }
+  });
+export type CreateExternalAccountInput = z.infer<typeof CreateExternalAccountInput>;
 
 export const CreateFamilyMemberInput = z.object({
   relationName: z.string().min(1).max(64),
@@ -223,24 +302,6 @@ export const UpdateClassificationRuleInput = z.object({
 });
 export type UpdateClassificationRuleInput = z.infer<typeof UpdateClassificationRuleInput>;
 
-/** Discover the CalDAV calendars available for a set of credentials. */
-export const CalDavDiscoverInput = z.object({
-  serverUrl: z.string().url(),
-  username: z.string().min(1),
-  password: z.string().min(1),
-});
-export type CalDavDiscoverInput = z.infer<typeof CalDavDiscoverInput>;
-
-const TargetCredential = z.object({
-  username: z.string().optional(),
-  password: z.string().optional(),
-  accessToken: z.string().optional(),
-  // Google OAuth: the consent authorization code + the redirect URI it was
-  // issued for; the server exchanges these for a stored refresh token.
-  authCode: z.string().optional(),
-  redirectUri: z.string().optional(),
-});
-
 /** Build a Google OAuth consent URL for the given redirect URI. */
 export const GoogleAuthorizeUrlInput = z.object({
   redirectUri: z.string().url(),
@@ -254,35 +315,46 @@ export type GoogleAuthorizeUrlInput = z.infer<typeof GoogleAuthorizeUrlInput>;
 export const AlertMinutes = z.array(z.number().int().min(0).max(40320)).max(2);
 export type AlertMinutes = z.infer<typeof AlertMinutes>;
 
-/** Partial update for an existing calendar target. */
+/**
+ * Partial update for an existing output feed (calendar target). Editable by the
+ * owner or any family admin. The delivery method, the linked account, and the
+ * target calendar are immutable — recreate the feed to change them.
+ */
 export const UpdateCalendarTargetInput = z.object({
   name: z.string().min(1).max(120).optional(),
   active: z.boolean().optional(),
-  addressOrUrl: z.string().min(1).optional(),
-  externalCalendarId: z.string().optional(),
-  providerHint: ProviderHint.optional(),
   alertMinutes: AlertMinutes.optional(),
-  credential: TargetCredential.optional(),
 });
 export type UpdateCalendarTargetInput = z.infer<typeof UpdateCalendarTargetInput>;
 
-export const CreateCalendarTargetInput = z.object({
-  memberId: Id,
-  name: z.string().min(1).max(120),
-  method: DeliveryMethod,
-  providerHint: ProviderHint.optional(),
-  addressOrUrl: z.string().min(1),
-  externalCalendarId: z.string().optional(),
-  /** Default alerts (minutes before start), at most two. */
-  alertMinutes: AlertMinutes.optional(),
-  /**
-   * Credential material (encrypted server-side into a `secret`). For caldav:
-   * username + password (e.g. iCloud app-specific password). For google: an
-   * OAuth `authCode` + `redirectUri` (exchanged for a refresh token), or a
-   * pasted `accessToken`. Omit for email targets.
-   */
-  credential: TargetCredential.optional(),
-});
+/**
+ * Create an output feed (calendar target) for a caretaker member. `email`
+ * targets stand alone (no account). `caldav`/`google` targets draw their
+ * credential from a connected `externalAccountId`; `addressOrUrl` (CalDAV
+ * collection URL / Google calendar id) + `externalCalendarId` name the immutable
+ * target calendar. Only the account owner may attach it, and only to their own
+ * caretaker member (enforced server-side).
+ */
+export const CreateCalendarTargetInput = z
+  .object({
+    memberId: Id,
+    name: z.string().min(1).max(120),
+    method: DeliveryMethod,
+    externalAccountId: Id.optional(),
+    addressOrUrl: z.string().min(1),
+    externalCalendarId: z.string().optional(),
+    /** Default alerts (minutes before start), at most two. */
+    alertMinutes: AlertMinutes.optional(),
+  })
+  .superRefine((v, ctx) => {
+    if (v.method === 'email') {
+      if (v.externalAccountId) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['externalAccountId'], message: 'email targets are not backed by an account' });
+      }
+    } else if (!v.externalAccountId) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['externalAccountId'], message: 'externalAccountId is required for caldav/google targets' });
+    }
+  });
 export type CreateCalendarTargetInput = z.infer<
   typeof CreateCalendarTargetInput
 >;

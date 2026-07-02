@@ -1,5 +1,6 @@
 import { and, eq, families, feeds, getDb } from '@igt/db';
 import type { Bindings } from './env.js';
+import { googleRefresherFor } from './lib/google-oauth.js';
 import { getProductionRegistry, syncFamily } from './services/delivery.js';
 import { ingestFeed } from './services/ingest.js';
 import { buildFeedTasks } from './services/tasks.js';
@@ -17,6 +18,7 @@ export async function scheduled(
 ): Promise<void> {
   const db = getDb(env.DB);
   const registry = getProductionRegistry(env);
+  const ingestSecrets = { kek: env.KEK, googleRefresh: googleRefresherFor(env) };
   const now = Date.now();
 
   const allFamilies = await db.select().from(families);
@@ -31,7 +33,7 @@ export async function scheduled(
           for (const feed of familyFeeds) {
             const last = feed.lastSyncedAt?.getTime() ?? 0;
             if (now - last >= feed.refreshMinutes * 60 * 1000) {
-              await ingestFeed(db, feed);
+              await ingestFeed(db, feed, ingestSecrets);
               await buildFeedTasks(db, feed);
             }
           }

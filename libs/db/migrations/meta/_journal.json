@@ -5,64 +5,8 @@
     {
       "idx": 0,
       "version": "6",
-      "when": 1782623410453,
-      "tag": "0000_init",
-      "breakpoints": true
-    },
-    {
-      "idx": 1,
-      "version": "6",
-      "when": 1782624657392,
-      "tag": "0001_auth",
-      "breakpoints": true
-    },
-    {
-      "idx": 2,
-      "version": "6",
-      "when": 1782754630792,
-      "tag": "0002_delivery_payload_hash",
-      "breakpoints": true
-    },
-    {
-      "idx": 3,
-      "version": "6",
-      "when": 1782755123985,
-      "tag": "0003_task_feed_id",
-      "breakpoints": true
-    },
-    {
-      "idx": 4,
-      "version": "6",
-      "when": 1782763340576,
-      "tag": "0004_feed_timezone",
-      "breakpoints": true
-    },
-    {
-      "idx": 5,
-      "version": "6",
-      "when": 1782787031150,
-      "tag": "0005_exclusion_block_and_alerts",
-      "breakpoints": true
-    },
-    {
-      "idx": 6,
-      "version": "6",
-      "when": 1782788887211,
-      "tag": "0006_source_event_dismissed",
-      "breakpoints": true
-    },
-    {
-      "idx": 7,
-      "version": "6",
-      "when": 1782805784527,
-      "tag": "0007_invite_member_claim",
-      "breakpoints": true
-    },
-    {
-      "idx": 8,
-      "version": "6",
-      "when": 1782879169024,
-      "tag": "0008_groovy_young_avengers",
+      "when": 1782926499920,
+      "tag": "0000_messy_calypso",
       "breakpoints": true
     }
   ]

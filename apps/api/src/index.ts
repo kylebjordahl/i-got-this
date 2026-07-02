@@ -4,6 +4,7 @@ import { cors } from 'hono/cors';
 import type { Bindings, HonoEnv } from './env.js';
 import { authMiddleware } from './middleware/auth.js';
 import { deliveryQueueConsumer } from './services/delivery.js';
+import { accountRoutes } from './routes/accounts.js';
 import { authRoutes } from './routes/auth.js';
 import { familyRoutes } from './routes/families.js';
 import { inviteRoutes } from './routes/invites.js';
@@ -41,6 +42,10 @@ app.route('/auth', authRoutes);
 
 // Member-claim invites (accept links a logged-in user to a pre-created member).
 app.route('/invites', inviteRoutes);
+
+// User-owned external calendar accounts (Google/iCloud/CalDAV) — private to the
+// user and reusable across their families; not family-scoped.
+app.route('/accounts', accountRoutes);
 
 /** Current user + the families they belong to (with their member record). */
 app.get('/me', authMiddleware, async (c) => {

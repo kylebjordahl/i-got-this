@@ -11,7 +11,6 @@ import {
 } from '@igt/db';
 import {
   CalDavProvider,
-  type DeliveryCredential,
   type DeliveryEvent,
   DeliveryProviderRegistry,
   type DeliveryTarget,
@@ -20,8 +19,8 @@ import {
 } from '@igt/delivery';
 import { EmailMessage } from 'cloudflare:email';
 import type { Bindings } from '../env.js';
-import { googleOAuthConfigured, refreshGoogleAccessToken } from '../lib/google-oauth.js';
-import { loadSecret } from './../lib/secrets.js';
+import { googleRefresherFor } from '../lib/google-oauth.js';
+import { resolveAccountCredential } from '../lib/account-credentials.js';
 
 type TaskRow = typeof tasks.$inferSelect;
 type TargetRow = typeof calendarTargets.$inferSelect;
@@ -143,16 +142,6 @@ function hashEvent(summary: string, task: TaskRow, alertMinutes: number[]): stri
   return (h >>> 0).toString(16);
 }
 
-async function resolveCredential(
-  db: Db,
-  kek: string | undefined,
-  credentialsRef: string | null,
-): Promise<DeliveryCredential | undefined> {
-  if (!credentialsRef || !kek) return undefined;
-  const raw = await loadSecret(db, kek, credentialsRef);
-  return raw ? (JSON.parse(raw) as DeliveryCredential) : undefined;
-}
-
 async function familyMemberNames(db: Db, familyId: string): Promise<Map<string, string>> {
   const members = await db
     .select()
@@ -173,7 +162,7 @@ async function syncTarget(
   result.targets++;
   if (!registry.has(target.method)) return; // provider unavailable (e.g. email off)
 
-  const credential = await resolveCredential(db, kek, target.credentialsRef);
+  const credential = await resolveAccountCredential(db, kek, target.externalAccountId);
   const deliveryTarget: DeliveryTarget = {
     method: target.method,
     addressOrUrl: target.addressOrUrl,
@@ -325,7 +314,7 @@ export async function purgeTargetRemote(
   target: TargetRow,
 ): Promise<void> {
   if (!registry.has(target.method)) return;
-  const credential = await resolveCredential(db, kek, target.credentialsRef);
+  const credential = await resolveAccountCredential(db, kek, target.externalAccountId);
   const deliveryTarget: DeliveryTarget = {
     method: target.method,
     addressOrUrl: target.addressOrUrl,
@@ -365,9 +354,7 @@ export async function purgeTargetRemote(
 export function getProductionRegistry(env: Bindings): DeliveryProviderRegistry {
   // Google provider can refresh a stored refresh token into an access token
   // (the OAuth client secret lives here, not in libs/delivery).
-  const googleRefresher = googleOAuthConfigured(env)
-    ? (refreshToken: string) => refreshGoogleAccessToken(env, refreshToken)
-    : undefined;
+  const googleRefresher = googleRefresherFor(env);
   const registry = new DeliveryProviderRegistry()
     .register(new CalDavProvider())
     // Bind fetch to the global scope — a bare `fetch` reference throws "Illegal

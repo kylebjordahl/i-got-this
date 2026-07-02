@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import '../models.dart';
 import '../state/auth.dart';
 import '../state/family.dart';
 import 'rules_screen.dart';
@@ -58,11 +59,22 @@ class _FeedTile extends ConsumerWidget {
     final linksAsync = ref.watch(feedLinksProvider(feedId));
     final rulesAsync = ref.watch(classificationRulesProvider);
 
+    final kind = feed['kind'] as String? ?? 'ics';
+    final title = (feed['url'] as String?) ??
+        (feed['sourceCalendarName'] as String?) ??
+        (feed['sourceCalendarId'] as String?) ??
+        'Account calendar';
+    final sourceLabel = switch (kind) {
+      'google' => 'Google',
+      'caldav' => 'CalDAV',
+      _ => 'ICS',
+    };
+
     return ExpansionTile(
-      leading: const CircleAvatar(child: Icon(Icons.rss_feed)),
-      title: Text(feed['url'] as String, maxLines: 1, overflow: TextOverflow.ellipsis),
+      leading: CircleAvatar(child: Icon(kind == 'ics' ? Icons.rss_feed : Icons.link)),
+      title: Text(title, maxLines: 1, overflow: TextOverflow.ellipsis),
       subtitle: Text(
-        '${feed['mode']} · ${feed['status']} · ${feed['timezone'] ?? 'UTC'} · every ${feed['refreshMinutes']}m',
+        '$sourceLabel · ${feed['mode']} · ${feed['status']} · ${feed['timezone'] ?? 'UTC'} · every ${feed['refreshMinutes']}m',
       ),
       childrenPadding: const EdgeInsets.only(bottom: 8),
       children: [
@@ -263,9 +275,16 @@ class _AddFeedDialog extends ConsumerStatefulWidget {
 }
 
 class _AddFeedDialogState extends ConsumerState<_AddFeedDialog> {
+  String _source = 'ics'; // 'ics' | 'account'
   final _url = TextEditingController();
   final _refresh = TextEditingController(text: '360');
   String _mode = 'exception';
+
+  String? _accountId;
+  List<Map<String, dynamic>> _calendars = const [];
+  String? _selectedCalId;
+  bool _loadingCals = false;
+
   bool _busy = false;
   String? _error;
 
@@ -276,23 +295,59 @@ class _AddFeedDialogState extends ConsumerState<_AddFeedDialog> {
     super.dispose();
   }
 
-  Future<void> _save() async {
-    if (!_url.text.trim().startsWith('http')) {
-      setState(() => _error = 'Enter a valid ICS URL');
-      return;
+  Future<void> _loadCalendars(String accountId) async {
+    setState(() {
+      _loadingCals = true;
+      _error = null;
+      _calendars = const [];
+      _selectedCalId = null;
+    });
+    try {
+      final cals = await ref.read(apiClientProvider).listAccountCalendars(accountId);
+      setState(() {
+        _calendars = cals.cast<Map<String, dynamic>>();
+        _selectedCalId = _calendars.isNotEmpty ? _calendars.first['id'] as String : null;
+        if (_calendars.isEmpty) _error = 'No calendars found in this account';
+      });
+    } catch (e) {
+      setState(() => _error = '$e');
+    } finally {
+      if (mounted) setState(() => _loadingCals = false);
     }
+  }
+
+  Future<void> _save(List<ExternalAccount> accounts) async {
+    final refreshMinutes = int.tryParse(_refresh.text.trim()) ?? 360;
     setState(() {
       _busy = true;
       _error = null;
     });
     try {
       final familyId = await ref.read(familyProvider.future);
-      await ref.read(apiClientProvider).createFeed(
-            familyId,
-            url: _url.text.trim(),
-            mode: _mode,
-            refreshMinutes: int.tryParse(_refresh.text.trim()) ?? 360,
-          );
+      final api = ref.read(apiClientProvider);
+      if (_source == 'ics') {
+        if (!_url.text.trim().startsWith('http')) {
+          setState(() => _error = 'Enter a valid ICS URL');
+          return;
+        }
+        await api.createFeed(familyId, url: _url.text.trim(), mode: _mode, refreshMinutes: refreshMinutes);
+      } else {
+        if (_accountId == null || _selectedCalId == null) {
+          setState(() => _error = 'Pick an account and a calendar');
+          return;
+        }
+        final account = accounts.firstWhere((a) => a.id == _accountId);
+        final cal = _calendars.firstWhere((c) => c['id'] == _selectedCalId);
+        await api.createFeed(
+          familyId,
+          kind: account.method,
+          externalAccountId: account.id,
+          sourceCalendarId: _selectedCalId,
+          sourceCalendarName: cal['name'] as String?,
+          mode: _mode,
+          refreshMinutes: refreshMinutes,
+        );
+      }
       if (mounted) Navigator.of(context).pop(true);
     } catch (e) {
       setState(() => _error = '$e');
@@ -303,46 +358,98 @@ class _AddFeedDialogState extends ConsumerState<_AddFeedDialog> {
 
   @override
   Widget build(BuildContext context) {
+    final accountsAsync = ref.watch(accountsProvider);
+    final accounts = accountsAsync.valueOrNull ?? const <ExternalAccount>[];
     return AlertDialog(
       title: const Text('Add input feed'),
-      content: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          TextField(
-            controller: _url,
-            autofocus: true,
-            keyboardType: TextInputType.url,
-            decoration: const InputDecoration(labelText: 'ICS URL', hintText: 'https://…/basic.ics'),
-          ),
-          const SizedBox(height: 12),
-          SegmentedButton<String>(
-            segments: const [
-              ButtonSegment(value: 'exception', label: Text('Exception')),
-              ButtonSegment(value: 'explicit', label: Text('Explicit')),
+      content: SingleChildScrollView(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            SegmentedButton<String>(
+              segments: const [
+                ButtonSegment(value: 'ics', label: Text('ICS URL')),
+                ButtonSegment(value: 'account', label: Text('Account')),
+              ],
+              selected: {_source},
+              onSelectionChanged: (s) => setState(() {
+                _source = s.first;
+                _error = null;
+              }),
+            ),
+            const SizedBox(height: 12),
+            if (_source == 'ics')
+              TextField(
+                controller: _url,
+                autofocus: true,
+                keyboardType: TextInputType.url,
+                decoration: const InputDecoration(labelText: 'ICS URL', hintText: 'https://…/basic.ics'),
+              )
+            else ...[
+              if (accounts.isEmpty)
+                const Text('Connect an account on the Accounts tab first.', style: TextStyle(fontSize: 13))
+              else
+                DropdownButtonFormField<String>(
+                  initialValue: _accountId,
+                  decoration: const InputDecoration(labelText: 'Account'),
+                  items: [
+                    for (final a in accounts)
+                      DropdownMenuItem(value: a.id, child: Text('${a.name} (${a.kindLabel})')),
+                  ],
+                  onChanged: (v) {
+                    setState(() => _accountId = v);
+                    if (v != null) _loadCalendars(v);
+                  },
+                ),
+              if (_loadingCals)
+                const Padding(padding: EdgeInsets.only(top: 12), child: LinearProgressIndicator()),
+              if (_calendars.isNotEmpty) ...[
+                const SizedBox(height: 12),
+                DropdownButtonFormField<String>(
+                  initialValue: _selectedCalId,
+                  decoration: const InputDecoration(labelText: 'Calendar'),
+                  items: [
+                    for (final c in _calendars)
+                      DropdownMenuItem(
+                        value: c['id'] as String,
+                        child: Text(c['name'] as String, maxLines: 1, overflow: TextOverflow.ellipsis),
+                      ),
+                  ],
+                  onChanged: (v) => setState(() => _selectedCalId = v),
+                ),
+              ],
             ],
-            selected: {_mode},
-            onSelectionChanged: (s) => setState(() => _mode = s.first),
-          ),
-          const Padding(
-            padding: EdgeInsets.only(top: 6),
-            child: Text(
-              'Exception: events are deviations from a Mon–Fri baseline (no-school, '
-              'early dismissal). Explicit: events become tasks directly.',
-              style: TextStyle(fontSize: 12),
+            const SizedBox(height: 12),
+            SegmentedButton<String>(
+              segments: const [
+                ButtonSegment(value: 'exception', label: Text('Exception')),
+                ButtonSegment(value: 'explicit', label: Text('Explicit')),
+              ],
+              selected: {_mode},
+              onSelectionChanged: (s) => setState(() => _mode = s.first),
             ),
-          ),
-          const SizedBox(height: 8),
-          TextField(
-            controller: _refresh,
-            keyboardType: TextInputType.number,
-            decoration: const InputDecoration(labelText: 'Refresh interval (minutes)'),
-          ),
-          if (_error != null)
-            Padding(
-              padding: const EdgeInsets.only(top: 8),
-              child: Text(_error!, style: TextStyle(color: Theme.of(context).colorScheme.error)),
+            const Padding(
+              padding: EdgeInsets.only(top: 6),
+              child: Text(
+                'Exception: events are deviations from a Mon–Fri baseline (no-school, '
+                'early dismissal). Explicit: events become tasks directly.',
+                style: TextStyle(fontSize: 12),
+              ),
             ),
-        ],
+            const SizedBox(height: 8),
+            TextField(
+              controller: _refresh,
+              keyboardType: TextInputType.number,
+              decoration: const InputDecoration(labelText: 'Refresh interval (minutes)'),
+            ),
+            if (_error != null)
+              Padding(
+                padding: const EdgeInsets.only(top: 8),
+                child: Text(_error!, style: TextStyle(color: Theme.of(context).colorScheme.error)),
+              ),
+          ],
+        ),
       ),
       actions: [
         TextButton(
@@ -350,7 +457,7 @@ class _AddFeedDialogState extends ConsumerState<_AddFeedDialog> {
           child: const Text('Cancel'),
         ),
         FilledButton(
-          onPressed: _busy ? null : _save,
+          onPressed: _busy ? null : () => _save(accounts),
           child: _busy
               ? const SizedBox(height: 18, width: 18, child: CircularProgressIndicator(strokeWidth: 2))
               : const Text('Add'),

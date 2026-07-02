@@ -45,6 +45,41 @@ class Member {
       );
 }
 
+/// A user-owned external calendar account (Google / iCloud / CalDAV), reusable
+/// across the user's families. Credentials never come back from the API.
+class ExternalAccount {
+  ExternalAccount({
+    required this.id,
+    required this.kind,
+    required this.name,
+    this.serverUrl,
+    this.username,
+  });
+
+  final String id;
+  final String kind; // 'google' | 'icloud' | 'caldav'
+  final String name;
+  final String? serverUrl;
+  final String? username;
+
+  String get kindLabel => switch (kind) {
+        'google' => 'Google',
+        'icloud' => 'iCloud',
+        _ => 'CalDAV',
+      };
+
+  /// The delivery method an account of this kind produces (google→google, else caldav).
+  String get method => kind == 'google' ? 'google' : 'caldav';
+
+  factory ExternalAccount.fromJson(Map<String, dynamic> j) => ExternalAccount(
+        id: j['id'] as String,
+        kind: j['kind'] as String,
+        name: j['name'] as String,
+        serverUrl: j['serverUrl'] as String?,
+        username: j['username'] as String?,
+      );
+}
+
 class TaskItem {
   TaskItem({
     required this.id,

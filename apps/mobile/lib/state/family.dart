@@ -99,3 +99,10 @@ final targetsProvider = FutureProvider<List<Map<String, dynamic>>>((ref) async {
   final familyId = await ref.watch(familyProvider.future);
   return (await api.listCalendarTargets(familyId)).cast<Map<String, dynamic>>();
 });
+
+/// The current user's connected external calendar accounts (not family-scoped).
+final accountsProvider = FutureProvider<List<ExternalAccount>>((ref) async {
+  final api = ref.watch(apiClientProvider);
+  final rows = await api.listAccounts();
+  return rows.map((e) => ExternalAccount.fromJson(e as Map<String, dynamic>)).toList();
+});

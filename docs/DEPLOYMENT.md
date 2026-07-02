@@ -187,6 +187,17 @@ cd apps/api && pnpm wrangler tail --env staging        # live logs
 - **Migrations** are applied by `wrangler d1 migrations apply` against the
   `d1_migrations` table — additive and idempotent. Generate new ones with
   `pnpm db:generate` (Drizzle) and commit `libs/db/migrations/*`.
+- **Resetting staging data (destructive)** — the external-accounts + input/output
+  feeds change (#26) is a breaking data-model reset with no clean migration (no
+  real customers yet). The migration history is squashed to a single baseline. To
+  wipe + re-initialize the staging D1:
+  ```bash
+  tools/reset-staging.zsh          # drops every table, then re-applies the baseline
+  ```
+  It runs `wrangler d1 execute --env staging --remote --file tools/reset-staging.sql`
+  (drops all app tables + the `d1_migrations` ledger) then
+  `wrangler d1 migrations apply DB --env staging --remote`. **Never** point it at
+  production.
 - **Email is disconnected** (`send_email` commented in `wrangler.jsonc`). Until a
   paid plan + verified sending domain are set up, magic-link login can't email in
   a deployed env — use **Sign in with Apple** or the **invite link** flow for

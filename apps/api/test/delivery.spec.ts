@@ -1,5 +1,13 @@
 import { env } from 'cloudflare:test';
-import { calendarTargets, deliveries, eq, getDb, secrets, tasks } from '@igt/db';
+import {
+  calendarTargets,
+  deliveries,
+  eq,
+  externalAccounts,
+  getDb,
+  secrets,
+  tasks,
+} from '@igt/db';
 import {
   type DeliveryEvent,
   type DeliveryProvider,
@@ -201,37 +209,52 @@ describe('delivery queue', () => {
   });
 });
 
-describe('calendar targets', () => {
-  it('creates a target, hides credentials, and encrypts caldav secrets', async () => {
+describe('output feeds (calendar targets)', () => {
+  it('creates an account-backed output feed drawing its credential from the account', async () => {
     const { admin, familyId, memberId } = await adminFamily('target-admin@example.com');
     const db = getDb(env.DB);
 
-    // CalDAV target with a credential → encrypted into a secret.
+    // Connect an iCloud account (owned by the admin user; credential encrypted).
+    const acctRes = await call(
+      '/accounts',
+      authed(admin.token, {
+        kind: 'icloud',
+        name: 'My iCloud',
+        username: 'me@icloud.com',
+        password: 'abcd-efgh-ijkl-mnop',
+      }),
+    );
+    expect(acctRes.status).toBe(201);
+    const account = ((await acctRes.json()) as {
+      account: { id: string; serverUrl: string };
+    }).account;
+    expect('credentialsRef' in (account as Record<string, unknown>)).toBe(false); // never leaked
+    expect(account.serverUrl).toBe('https://caldav.icloud.com'); // iCloud default
+
+    // A CalDAV output feed backed by that account — no credential on the target.
     const res = await call(
       `/families/${familyId}/calendar-targets`,
       authed(admin.token, {
         memberId,
         name: 'iCloud',
         method: 'caldav',
-        providerHint: 'icloud',
+        externalAccountId: account.id,
         addressOrUrl: 'https://caldav.icloud.com/123/calendars/home/',
-        credential: { username: 'me@icloud.com', password: 'abcd-efgh-ijkl-mnop' },
       }),
     );
     expect(res.status).toBe(201);
-    const body = (await res.json()) as { target: Record<string, unknown> };
-    expect('credentialsRef' in body.target).toBe(false); // never leaked
+    const target = ((await res.json()) as {
+      target: { id: string; externalAccountId: string; providerHint: string };
+    }).target;
+    expect(target.externalAccountId).toBe(account.id);
+    expect(target.providerHint).toBe('icloud');
 
-    // The stored credential decrypts to the original.
-    const row = (
-      await db
-        .select()
-        .from(calendarTargets)
-        .where(eq(calendarTargets.memberId, memberId))
-        .limit(1)
+    // The account's stored credential decrypts to the original.
+    const acctRow = (
+      await db.select().from(externalAccounts).where(eq(externalAccounts.id, account.id)).limit(1)
     )[0]!;
-    expect(row.credentialsRef).toBeTruthy();
-    const secret = JSON.parse((await loadSecret(db, env.KEK, row.credentialsRef!))!);
+    expect(acctRow.credentialsRef).toBeTruthy();
+    const secret = JSON.parse((await loadSecret(db, env.KEK, acctRow.credentialsRef!))!);
     expect(secret).toEqual({
       kind: 'basic',
       username: 'me@icloud.com',
@@ -243,9 +266,39 @@ describe('calendar targets', () => {
     expect(targets.length).toBeGreaterThanOrEqual(1);
   });
 
-  it('edits a target and deletes it (cleaning up its secret)', async () => {
+  it('rejects an account-backed target whose calendar the caller does not own', async () => {
+    const { admin, familyId, memberId } = await adminFamily('owner-admin@example.com');
+
+    // A different user's account may not be attached, even by a family admin.
+    const stranger = await login('stranger@example.com');
+    const acctRes = await call(
+      '/accounts',
+      authed(stranger.token, { kind: 'icloud', name: 'Not Yours', username: 'x', password: 'y' }),
+    );
+    const accountId = ((await acctRes.json()) as { account: { id: string } }).account.id;
+
+    const res = await call(
+      `/families/${familyId}/calendar-targets`,
+      authed(admin.token, {
+        memberId,
+        name: 'Nope',
+        method: 'caldav',
+        externalAccountId: accountId,
+        addressOrUrl: 'https://caldav.icloud.com/123/calendars/home/',
+      }),
+    );
+    expect(res.status).toBe(404); // not the caller's account
+  });
+
+  it('edits an output feed and deletes it, leaving the account + its secret intact', async () => {
     const { admin, familyId, memberId } = await adminFamily('edit-admin@example.com');
     const db = getDb(env.DB);
+
+    const acctRes = await call(
+      '/accounts',
+      authed(admin.token, { kind: 'icloud', name: 'iCloud', username: 'me@icloud.com', password: 'pw' }),
+    );
+    const account = ((await acctRes.json()) as { account: { id: string } }).account;
 
     const created = await call(
       `/families/${familyId}/calendar-targets`,
@@ -253,16 +306,11 @@ describe('calendar targets', () => {
         memberId,
         name: 'iCloud',
         method: 'caldav',
-        providerHint: 'icloud',
+        externalAccountId: account.id,
         addressOrUrl: 'https://caldav.icloud.com/123/calendars/home/',
-        credential: { username: 'me@icloud.com', password: 'pw' },
       }),
     );
     const targetId = ((await created.json()) as { target: { id: string } }).target.id;
-    const before = (
-      await db.select().from(calendarTargets).where(eq(calendarTargets.id, targetId)).limit(1)
-    )[0]!;
-    expect(before.credentialsRef).toBeTruthy();
 
     // Edit name + active.
     const patch = await call(`/families/${familyId}/calendar-targets/${targetId}`, {
@@ -276,27 +324,31 @@ describe('calendar targets', () => {
     }).target;
     expect(patched.name).toBe('Personal iCloud');
     expect(patched.active).toBe(false);
-    expect('credentialsRef' in (patched as Record<string, unknown>)).toBe(false);
 
-    // Delete → row + secret gone.
+    // Delete the output feed → the target row is gone…
     const del = await call(`/families/${familyId}/calendar-targets/${targetId}`, {
       method: 'DELETE',
       headers: { Authorization: `Bearer ${admin.token}` },
     });
     expect(del.status).toBe(200);
-
     const after = await db
       .select()
       .from(calendarTargets)
       .where(eq(calendarTargets.id, targetId))
       .limit(1);
     expect(after).toHaveLength(0);
-    const secretGone = await db
+
+    // …but the reusable account + its encrypted credential survive.
+    const acctRow = (
+      await db.select().from(externalAccounts).where(eq(externalAccounts.id, account.id)).limit(1)
+    )[0];
+    expect(acctRow).toBeTruthy();
+    const secretStillThere = await db
       .select()
       .from(secrets)
-      .where(eq(secrets.id, before.credentialsRef!))
+      .where(eq(secrets.id, acctRow!.credentialsRef!))
       .limit(1);
-    expect(secretGone).toHaveLength(0);
+    expect(secretStillThere).toHaveLength(1);
   });
 });
 

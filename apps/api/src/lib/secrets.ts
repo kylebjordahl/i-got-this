@@ -93,11 +93,15 @@ export async function decryptSecret(
   return new TextDecoder().decode(pt);
 }
 
-/** Encrypt + persist a secret; returns its id (for calendar_target.credentialsRef). */
+/**
+ * Encrypt + persist a secret; returns its id. `familyId` scopes it to a family
+ * (cascade-deleted with it); pass `null` for a user-owned secret (e.g. an
+ * external account credential reused across the owner's families).
+ */
 export async function storeSecret(
   db: Db,
   kekB64: string,
-  familyId: string,
+  familyId: string | null,
   plaintext: string,
 ): Promise<string> {
   const enc = await encryptSecret(kekB64, plaintext);
