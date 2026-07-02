@@ -25,6 +25,13 @@ export interface AppleJwk {
 export interface VerifyAppleOptions {
   /** Allowed `aud` values — your iOS bundle id and/or web Services ID. */
   audience: string | string[];
+  /**
+   * Expected `nonce`. The web (Services ID) flow round-trips a nonce through
+   * Apple, which echoes it into the token; passing it here asserts the token
+   * belongs to the flow we started (replay protection). Omitted for the native
+   * flow, which doesn't set one.
+   */
+  nonce?: string;
   /** Injected JWKS (skips the network fetch); used in tests. */
   jwks?: AppleJwk[];
   fetchImpl?: typeof fetch;
@@ -94,6 +101,7 @@ export async function verifyAppleIdentityToken(
     sub?: string;
     exp?: number;
     email?: string;
+    nonce?: string;
   };
   if (payload.iss !== APPLE_ISSUER) throw new Error('unexpected token issuer');
   const audiences = Array.isArray(opts.audience) ? opts.audience : [opts.audience];
@@ -103,6 +111,9 @@ export async function verifyAppleIdentityToken(
   const now = opts.now ?? Date.now();
   if (typeof payload.exp === 'number' && payload.exp * 1000 < now) {
     throw new Error('identity token expired');
+  }
+  if (opts.nonce !== undefined && payload.nonce !== opts.nonce) {
+    throw new Error('identity token nonce mismatch');
   }
   if (!payload.sub) throw new Error('identity token missing subject');
 

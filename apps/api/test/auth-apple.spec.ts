@@ -60,6 +60,30 @@ describe('Sign in with Apple — token verification', () => {
     expect(id.email).toBe('abc@privaterelay.appleid.com');
   });
 
+  it('enforces the nonce when one is expected (web flow)', async () => {
+    const { privateKey, jwks } = await makeKeyAndJwks(KID);
+    const now = Date.now();
+    const token = await signToken(privateKey, KID, {
+      iss: ISSUER,
+      aud: AUD,
+      sub: 's',
+      nonce: 'the-real-nonce',
+      exp: Math.floor(now / 1000) + 600,
+    });
+    // Matching nonce → ok.
+    const id = await verifyAppleIdentityToken(token, {
+      audience: AUD,
+      jwks,
+      now,
+      nonce: 'the-real-nonce',
+    });
+    expect(id.sub).toBe('s');
+    // Wrong nonce → rejected.
+    await expect(
+      verifyAppleIdentityToken(token, { audience: AUD, jwks, now, nonce: 'other' }),
+    ).rejects.toThrow(/nonce/);
+  });
+
   it('rejects a wrong audience, expiry, and a wrong signing key', async () => {
     const { privateKey, jwks } = await makeKeyAndJwks(KID);
     const now = Date.now();
@@ -104,5 +128,80 @@ describe('POST /auth/apple', () => {
     await waitOnExecutionContext(ctx);
     // APPLE_CLIENT_IDS isn't set in the test env → the route is disabled.
     expect(res.status).toBe(501);
+  });
+});
+
+describe('Web Sign in with Apple redirect flow', () => {
+  const WEB_ID = 'com.example.caretaker.web';
+  const ORIGIN = 'https://app.test';
+  const REDIRECT = `${ORIGIN}/api/auth/apple/callback`;
+  const webEnv = {
+    ...env,
+    PUBLIC_ORIGIN: ORIGIN,
+    APPLE_CLIENT_IDS: WEB_ID,
+    APPLE_WEB_CLIENT_ID: WEB_ID,
+  };
+
+  async function fetchWith(request: Request, bindings: typeof env) {
+    const ctx = createExecutionContext();
+    const res = await app.fetch(request, bindings, ctx);
+    await waitOnExecutionContext(ctx);
+    return res;
+  }
+
+  it('GET /auth/apple/start → 501 when the web flow is unconfigured', async () => {
+    const res = await fetchWith(
+      new Request('https://api.test/auth/apple/start'),
+      env,
+    );
+    expect(res.status).toBe(501);
+  });
+
+  it('GET /auth/apple/start → 302 to Apple with state cookie + params', async () => {
+    const res = await fetchWith(
+      new Request('https://api.test/auth/apple/start'),
+      webEnv,
+    );
+    expect(res.status).toBe(302);
+    const location = new URL(res.headers.get('location')!);
+    expect(location.origin + location.pathname).toBe(
+      'https://appleid.apple.com/auth/authorize',
+    );
+    expect(location.searchParams.get('client_id')).toBe(WEB_ID);
+    expect(location.searchParams.get('redirect_uri')).toBe(REDIRECT);
+    expect(location.searchParams.get('response_mode')).toBe('form_post');
+    expect(location.searchParams.get('state')).toBeTruthy();
+    expect(location.searchParams.get('nonce')).toBeTruthy();
+    expect(res.headers.get('set-cookie')).toContain('igt_apple_oauth=');
+  });
+
+  it('POST /auth/apple/callback → sends Apple errors back to the app', async () => {
+    const res = await fetchWith(
+      new Request('https://api.test/auth/apple/callback', {
+        method: 'POST',
+        headers: { 'content-type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({ error: 'user_cancelled_authorize' }).toString(),
+      }),
+      webEnv,
+    );
+    expect(res.status).toBe(302);
+    expect(res.headers.get('location')).toBe(
+      'https://app.test/app/#auth_error=user_cancelled_authorize',
+    );
+  });
+
+  it('POST /auth/apple/callback → rejects a response with no matching state cookie', async () => {
+    const res = await fetchWith(
+      new Request('https://api.test/auth/apple/callback', {
+        method: 'POST',
+        headers: { 'content-type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({ state: 'abc', id_token: 'x.y.z' }).toString(),
+      }),
+      webEnv,
+    );
+    expect(res.status).toBe(302);
+    expect(res.headers.get('location')).toBe(
+      'https://app.test/app/#auth_error=state_mismatch',
+    );
   });
 });
